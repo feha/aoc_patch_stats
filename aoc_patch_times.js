@@ -5,10 +5,8 @@
 // @version      0.1
 // @description  Patches the bug in AoC where their timekeeping accidentally stores time since questions release, rather than time since user started the question.
 // @author       F
-//// @include      /^https?://.*/
 // @match https://adventofcode.com/*
 // @match https://adventofcode.com*
-//// @include /.*://https://adventofcode.com//?/
 // @grant       GM_getValue
 // @grant       GM_setValue
 // @noframes
@@ -33,14 +31,20 @@ console.log("aoc_patch_times start!");
 
 const PARTS_PER_DAY = 2;
 
+const SELECTOR_IN_PROGRESS = ".in-progress";
+const SELECTOR_TOTAL_IN_PROGRESS = ".total-in-progress";
+const SELECTOR_BUTTON_BREAK = ".button-break";
+const SELECTOR_BUTTON_RESUME = ".button-resume";
 const SELECTOR_QUESTION = ".day-desc";
 const SELECTOR_SUCCESS = ".day-success";
 const SELECTOR_SUCCESS_STAR_COUNTER = "p";
+const SELECTOR_SIDEBAR = "#sidebar";
 
 const KEY_TIMEKEEPING = "timekeeping";
 const KEY_STARTS = "starts";
 const KEY_STARS = "stars";
-const KEY_RESUME = "resume";
+const KEY_BREAKS = "breaks";
+const KEY_RESUMES = "resumes";
 
 let get_stored_json = async (key) => {
     // const v = window.localStorage.getItem(key);
@@ -71,7 +75,8 @@ const aoc_stats_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/leaderbo
 
 const unique = (arr) => [...new Set(arr)];
 
-const set_visible = (e, visible) => visible ? e.removeAttribute("hidden") : e.setAttribute("hidden", "");
+const set_visible = (e, visible) => visible ? e.setAttribute('style', '') : e.setAttribute('style', 'visibility: hidden;');
+// const set_visible = (e, visible) => visible ? e.removeAttribute('hidden') : e.setAttribute('hidden', '');
 
 const replace_nodeName = (node, new_tagName) => {
     // console.log("replace_nodename",node,node.attributes);
@@ -95,13 +100,13 @@ const msPerDay = msPerHour * 24;
 const msPerWeek = msPerDay * 7;
 const msPerMonth = msPerDay * 30;
 const msPerYear = msPerMonth * 365;
-const time_length = (timestamp_diff, format) => {
+const time_length = (diff, format) => {
     // const start = new Date(timestamp_start);
     // const end = new Date(timestamp_end);
 
-    if (timestamp_diff == undefined) { return [undefined, undefined] }
+    if (diff == undefined) { return [undefined, undefined] }
 
-    let diff = parseInt(timestamp_diff) // allow for strings
+    diff = parseInt(diff) // allow for strings
     let msPerUnit = [msPerYear, msPerMonth, msPerDay, msPerHour, msPerMinute, msPerSecond, msPerMs];
     let count = msPerUnit.map(ms => {
         let s = "" + Math.floor(diff / ms);
@@ -117,6 +122,35 @@ const time_length = (timestamp_diff, format) => {
             // .map((s, i) => [s, units[i]])]
     return [count, units];
 };
+
+// timestamps formatted for the timekeeping ui
+const time_formatted = (diff) => {
+    const format = ["yyyy", "mm", "dd", "hh", "mm", "ss", "000"];
+    const delim = ":";
+    let [duration] = time_length(diff, format);
+    if (duration !== undefined) {
+        let idx = duration.findIndex(n => n != 0);
+        duration = duration
+            .filter((_, i) => i >= idx)
+            .slice(0, -1)
+            .join(delim);
+    }
+    
+    return duration;
+}
+// dates formatted for the timekeeping ui
+const date_formatted = (date) => {
+    const date_delim = "-";
+    const middle_delim = ":";
+    const clock_delim = ":";
+    // date = date.toLocaleString("en-ZA", {year: "numeric", month: "2-digit", day: "2-digit"})
+    //         + "-" + date.toLocaleString("en-ZA", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+    date = [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDay()].map(s => (""+s).padStart(2, '0')).join(date_delim)
+            + middle_delim
+            + [date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()].map(s => (""+s).padStart(2, '0')).join(clock_delim)
+    
+    return date;
+}
 
 const get_time_since = (timestamp) => {
     const msPerSecond = 1000;
@@ -153,6 +187,176 @@ const waitForKeyElement = (selector, callback) => {
 //#endregion
 
 
+const gui_css_str = () => {
+    return [
+        /*css*/`
+        .hidden {
+            visibility: hidden;
+        }`,
+        /*css*/`
+        .${KEY_TIMEKEEPING} {
+            position: sticky;
+            top: 10%;
+            float: right;
+            clear: both;
+        }`,
+        /*css*/`
+        .${KEY_TIMEKEEPING}-inner {
+            border: 1px solid rgb(51, 51, 64);
+            background: rgb(9, 9, 16);
+            padding: 0.3em;
+            padding-right: 2em;
+        }`,
+        /*css*/`
+        .button-parent {
+            display: grid;
+            width: fit-content;
+            grid-template-rows: repeat(auto-fit, minmax(0px, 0px));
+        }`,
+        /*css*/`
+        ${SELECTOR_BUTTON_BREAK}, ${SELECTOR_BUTTON_RESUME} {
+            background: rgb(42, 42, 54);
+            color: inherit;
+            padding: 0.55em 0.7em 0.5em 0.7em;
+            margin: 0.5em;
+            width: 100%;
+            height: fit-content;
+        }`,
+    ];
+};
+
+const gui_str = (starts, stars, breaks, resumes) => {
+    let diffs = starts.map((start,i) => {
+        return stars[i] || Date.now() - start;
+    });
+    let parts = starts.map((start,i) => {
+        // `starts.map` ensures start is defined, but not the 'zipped' values.
+        let star = stars[i]; // likely undefined
+        let diff = diffs[i]; // likely NaN
+
+        let start_timestamp = date_formatted(new Date(start));
+
+        let star_timestamp = "In Progress";
+        if (star !== undefined) {
+            let star_timestamp = date_formatted(new Date(star));
+        } else {
+            diff = Date.now() - start;
+        }
+        let duration = time_formatted(diff);
+
+        let breaks = [];
+        let str = /*html*/`
+            <table>
+                <tr><td><span>Part ${i+1}:</span></td></tr>
+                <tr><td style="line-height: 0; padding-bottom: 0.5em;"><span>${' -'.repeat(4)}</span></td></tr>
+                <tr><td><span>Start: </span></td><td><span>${start_timestamp}</span></td></tr>
+                <tr><td><span>End: </span></td><td><span>${star_timestamp}</span></td></tr>
+            </table>
+            <div>
+                <span>${' -'.repeat(8)}</span>
+            </div>
+            <div>
+                <span>Duration: </span><span ${star === undefined ? `class="in-progress"` : ''}>${duration}</span>
+            </div>
+        `;
+
+        return str;
+    });
+
+    let sum = diffs.reduce((acc, n) => acc + n, 0);
+    let total = time_formatted(sum);
+    
+    // `starts.length == stars.length` should only hold true when user completed the day.
+    let complete = starts.length === stars.length;
+
+    let wrap_stars = str => `<span class="star-count">* </span>${str}<span class="star-count"> *</span>`;
+    let state = complete ? 'Complete!' : 'In Progress';
+    state = `<span>${state}</span>`;
+    state = complete ? wrap_stars(state) : state;
+
+    let str = /*html*/`
+        <div class="${KEY_TIMEKEEPING}">
+            <div class="${KEY_TIMEKEEPING}-inner">
+                <div>
+                    ${parts.join('')}
+                </div>
+                <div>
+                    <span>${'='.repeat(16)}</span>
+                </div>
+                <div>
+                    <span>State: </span>${state}
+                </div>
+                <div>
+                    <span>Total: </span><span class="total-in-progress">${total}</span>
+                </div>
+            </div>
+            <div class="button-parent">
+                <button class="button-break">Start Break!</button>
+                <button class="button-resume">Unbreak.</button>
+            </div>
+        </div>
+    `;
+
+    return str;
+};
+
+
+const day_gui = (year, day) => {
+    let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
+    let timestamps = days[day] = (days[day] || {});
+    let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
+    let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
+    let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
+    let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
+
+    let str = gui_str(starts, stars);
+
+    let sheet = document.styleSheets[1];
+    gui_css_str().forEach(rule => sheet.insertRule(rule, sheet.cssRules.length));
+
+    document.querySelector(SELECTOR_SIDEBAR).insertAdjacentHTML("afterEnd", str);
+
+    let _ = setInterval(() => {
+        let diffs = starts.map((start,i) => {
+            return stars[i] || Date.now() - start;
+        });
+        document.querySelectorAll(SELECTOR_IN_PROGRESS).forEach((el, i) => {
+            let duration = time_formatted(diffs[i]);
+            el.innerHTML = duration;
+        });
+        document.querySelectorAll(SELECTOR_TOTAL_IN_PROGRESS).forEach(el => {
+            let sum = diffs.reduce((acc, n) => acc + n, 0);
+            let total = time_formatted(sum);
+            el.innerHTML = total;
+        });
+    }, 1000);
+
+    let button_break = document.querySelector(SELECTOR_BUTTON_BREAK);
+    let button_resume = document.querySelector(SELECTOR_BUTTON_RESUME);
+
+    let on_break = breaks.length > resumes.length;
+    set_visible(button_break, !on_break);
+    set_visible(button_resume, on_break);
+
+    button_break.addEventListener("click", (e) => {
+        console.log(`BUTTON>BREAK: Storing break-log.`);
+        breaks.push( Date.now() );
+        let on_break = breaks.length > resumes.length;
+        set_visible(button_break, !on_break);
+        set_visible(button_resume, on_break);
+        set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
+    });
+    button_resume.addEventListener("click", (e) => {
+        console.log(`BUTTON>RESUME: Storing resume-log.`);
+        resumes.push( Date.now() );
+        let on_break = breaks.length > resumes.length;
+        set_visible(button_break, !on_break);
+        set_visible(button_resume, on_break);
+        set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
+    });
+};
+
+
 //#region entry-point
 
 const main = () => {
@@ -162,6 +366,7 @@ const main = () => {
     // check domain for triggers (opened question; gave answer)
     let trigger_start = location.href.match(aoc_trigger_start_regex);
     let trigger_end = location.href.match(aoc_trigger_end_regex);
+    let stats = location.href.match(aoc_stats_regex);
 
     // opened question
     if (trigger_start !== null) {
@@ -171,7 +376,6 @@ const main = () => {
         let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
         let timestamps = days[day] = (days[day] || {});
 
-        // let parts = time[KEY_PARTS] = (time[KEY_PARTS] || {});
         let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
         let first_any = false;
         document.body.querySelectorAll(SELECTOR_QUESTION).forEach((_, i) => {
@@ -191,12 +395,12 @@ const main = () => {
             }
         });
         if (!first_any && starts.length < PARTS_PER_DAY) {
-            console.log(`TRIGGER>START>RESUMING: Storing resume log.`);
-            let resume = timestamps[KEY_RESUME] = timestamps[KEY_RESUME] || [];
-            resume.push( Date.now() );
+            console.log(`TRIGGER>START>RESUMING: Storing resume log is not automatic.`);
+            // let resume = timestamps[KEY_RESUMES] = timestamps[KEY_RESUMES] || [];
+            // resume.push( Date.now() );
         }
-        
-        console.log(`  Current stats:\n`, timestamps);
+
+        day_gui(year, day);
 
         set_stored_json(KEY_TIMEKEEPING, { ...STORED_TIMEKEEPING });
     }
@@ -245,13 +449,10 @@ const main = () => {
             });
         }
 
-        console.log(`  Current stats:\n`, timestamps);
-
         set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
     }
 
     // stats
-    let stats = location.href.match(aoc_stats_regex);
     if (stats !== null) {
         let year = parseInt(stats[1], 10);
 
@@ -273,19 +474,22 @@ const main = () => {
             let pre = line.match(re_pre);
             if (pre !== null) {
                 pre = pre[1];
-                console.log(`"${pre}"`);
                 let day = pre.match(re_day)[1];
-                console.log(`"${day}"`);
                 let parts = line.slice(pre.length).match(re_parts);
     
                 let timestamps = days[day];
                 if (timestamps === undefined) {
-                    console.log(`[WARNING] LEADERBOARD> Warn(Code: 0): User has statistic for untracked day = ${day}`);
+                    console.log(`[WARNING] LEADERBOARD> Warn(Code: 1): User has statistic for untracked day = ${day}`);
                     timestamps = days[day] = {};
                 }
                 
                 let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
                 let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
+
+                if (starts.length < stars.length) { // Error instead?
+                    console.log(`[WARNING] LEADERBOARD> Warn(Code: 2): User somehow has more stars than starts.`);
+                    days = STORED_TIMEKEEPING[year] = {};
+                }
                 let diffs = stars.map((end, i) => end - starts[i]);
 
                 

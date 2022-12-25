@@ -35,6 +35,10 @@ const SELECTOR_TIMEKEEPING = ".timekeeping";
 const SELECTOR_TIMEKEEPING_INNER = SELECTOR_TIMEKEEPING + "-inner";
 const SELECTOR_IN_PROGRESS = ".in-progress";
 const SELECTOR_TOTAL_IN_PROGRESS = ".total-in-progress";
+const SELECTOR_BREAK_IN_PROGRESS = ".break-in-progress";
+const SELECTOR_BREAK_TOTAL_IN_PROGRESS = ".break-total-in-progress";
+const SELECTOR_IN_PROGRESS_BREAKS = ".in-progress-breaks";
+const SELECTOR_BREAKS = ".breaks";
 const SELECTOR_BUTTON_BREAK_PARENT = ".button-parent";
 const SELECTOR_BUTTON_BREAK = ".button-break";
 const SELECTOR_BUTTON_RESUME = ".button-resume";
@@ -128,30 +132,79 @@ const time_length = (diff, format) => {
 };
 
 // timestamps formatted for the timekeeping ui
-const time_formatted = (diff) => {
+const time_formatted = (diff, add_units = true, min_size) => {
+    if (diff < 1000) { // just return the milliseconds if diff < 1 second
+        return diff + (add_units && " ms");
+    }
+
     const format = ["yyyy", "mm", "dd", "hh", "mm", "ss", "000"];
     const delim = ":";
-    let [duration] = time_length(diff, format);
+    // add_units = add_units && ["h", "m", "s"] || [];
+
+    let [duration, units] = time_length(diff, format);
     if (duration !== undefined) {
+        duration = duration.slice(0, -1); // Remove ms
+
         let idx = duration.findIndex(n => n != 0);
+        idx = min_size ? Math.min(idx, duration.length-min_size) : idx;
+
+
+        if (add_units) {
+            duration = duration.map((s,i) => s + units[i].short);
+        }
         duration = duration
-            .filter((_, i) => i >= idx)
-            .slice(0, -1)
+            .filter((_, i) => i >= idx) // remove front-trailing zeroes
             .join(delim);
     }
     
     return duration;
 }
 // dates formatted for the timekeeping ui
-const date_formatted = (date) => {
+const date_formatted = (date, units, only_differences) => {
     const date_delim = "-";
-    const middle_delim = ":";
+    const middle_delim = "::";
     const clock_delim = ":";
-    // date = date.toLocaleString("en-ZA", {year: "numeric", month: "2-digit", day: "2-digit"})
-    //         + "-" + date.toLocaleString("en-ZA", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-    date = [date.getUTCFullYear(), date.getUTCMonth()+1, date.getUTCDay()].map(s => (""+s).padStart(2, '0')).join(date_delim)
+    const units_short = ["Y", "M", "d", "h", "m", "s", "ms"];
+    
+    units = units ? (() => {
+        let t = typeof units;
+        switch (t) {
+            case "array":
+                return units;
+            case "string":
+                return units_short.map(u => units.split('').find(c => c == u) ? u : '');
+            default:
+                return units_short;
+        }
+    })() : Array(units_short.length).fill('');
+    
+    let fs = [
+        d=>d.getUTCFullYear(),
+        d=>d.getUTCMonth()+1,
+        d=>d.getUTCDate(),
+        d=>d.getUTCHours(),
+        d=>d.getUTCMinutes(),
+        d=>d.getUTCSeconds(),
+        d=>d.getUTCMilliseconds(),
+    ];
+    date = fs.map(f => f(date))
+            .map((n,i) => (""+n).padStart(2, '0')+units[i]);
+
+    if (only_differences) {
+        let d2 = only_differences;
+        d2 = fs.map(f => f(d2))
+                .map((n,i) => (""+n).padStart(2, '0')+units[i]);
+        let idx = date.findIndex((s,i) => s != d2[i]);
+        date = date.filter((_, i) => i >= idx);
+    }
+
+    let clock =  date.slice(-4).slice(0,-1);
+    date = date.slice(0, -4);
+    
+    date = ''
+            + date.join(date_delim)
             + middle_delim
-            + [date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()].map(s => (""+s).padStart(2, '0')).join(clock_delim)
+            + clock.join(clock_delim);
     
     return date;
 }
@@ -187,6 +240,15 @@ const waitForKeyElement = (selector, callback) => {
         }).observe(document.body, {childList:true, subtree:true});
     }
 };
+
+let listeners = {};
+const add_listener = (key, f) => {
+    listeners[key] = listeners[key] || [];
+    listeners[key].push(f);
+}
+const call_listeners = (key) => {
+    listeners[key].forEach(f => f(key));
+}
 
 //#endregion
 
@@ -226,8 +288,82 @@ const gui_css_str = () => {
             width: 100%;
             height: fit-content;
         }`,
+        /*css*/`
+        details summary:after {
+            vertical-align: top;
+            content: "...";
+        }`,
+        /*css*/`
+        details[open] summary:after {
+            content: "";
+        }`,
+        /*css*/`
+        details>summary {/* Remove default triangle */
+            list-style: none;
+        }`,
+        /*css*/`
+        summary::-webkit-details-marker /* Safari */ {
+            display: none
+        }`,
+        /*css*/`
+        summary:before { /* Add a better triangle */
+            content: ' ';
+            display: inline-block;
+            
+            border-top: 5px solid transparent;
+            border-bottom: 5px solid transparent;
+            border-left: 5px solid currentColor;
+            
+            margin-right: .7rem;
+            transform: translateY(-2px);
+            
+            transition: transform .2s ease-out; /* animate */
+        }`,
+        /*css*/`
+        details[open] summary:before {
+            transform: rotate(90deg) translateX(-3px);
+        }`,
+        /*css*/`
+        .td-right {
+            text-align: right;
+        }`,
     ];
 };
+
+let break_opens = [];
+const gui_break_str = (start, star, breaks, resumes) => {
+    let no_breaks = breaks.length == 0;
+    let collapse_breaks = breaks.length > 1;
+    let on_break = breaks.length > resumes.length;
+
+    // let breaks_diff = breaks.map((n, i) => (resumes[i] || Date.now()) - n);
+    let breaks_diff = breaks.map((n, i) => (resumes[i] || Date.now()) - n);
+    let breaks_diff_formatted = breaks.map((n, i) => time_formatted((resumes[i] || Date.now()) - n, true, 2));
+
+    let state = 'Ongoing';
+    let entries = breaks.map((n, i) => {
+        let in_progress = resumes[i] === undefined ? `class="${SELECTOR_BREAK_IN_PROGRESS.slice(1)}" data-since="${n}"` : '';
+
+        return `<tr><td class="td-right"><span ${in_progress}>${breaks_diff_formatted[i]}</span> : </td><td>${date_formatted(new Date(n))}</td></tr>`;
+    }).join('');
+
+    let dynamic_breaks = star !== undefined ? '' : `data-since="${start}" class="${SELECTOR_IN_PROGRESS_BREAKS}"`
+
+    let sum = breaks_diff.reduce((acc, n) => acc + n, 0);
+    let total = time_formatted(sum);
+
+    let str = /*html*/`
+        Breaks: <span ${on_break ? `class="${SELECTOR_BREAK_TOTAL_IN_PROGRESS.slice(1)}"` : ''} data-since="${start}" data-star="${star || ''}">${total}</span>
+        <details ${no_breaks ? 'hidden' : ''}>
+            <summary></summary>
+            <table ${dynamic_breaks}>
+                ${entries}
+            </table>
+        </details>
+    `;
+
+    return str;
+}
 
 const gui_str = (starts, stars, breaks, resumes) => {
     let diffs = starts.map((start,i) => {
@@ -237,6 +373,15 @@ const gui_str = (starts, stars, breaks, resumes) => {
         // `starts.map` ensures start is defined, but not the 'zipped' values.
         let star = stars[i]; // likely undefined
         let diff = diffs[i]; // likely NaN
+
+        // Filter out breaks not in current part.
+        // Undefined behaviour when user claims to have been on break when they got a star.
+        // Because the script stops any ongoing break when receiving a star,
+        // this should never happen without something like manually edited logs anyway.
+        let breaks_filtered = breaks
+                .filter(n => start <= n && (!star || n <= star));
+        let resumes_filtered = resumes
+                .filter(n => start <= n && (!star || n <= star));
 
         let start_timestamp = date_formatted(new Date(start));
 
@@ -248,19 +393,23 @@ const gui_str = (starts, stars, breaks, resumes) => {
         }
         let duration = time_formatted(diff);
 
-        let breaks = [];
         let str = /*html*/`
             <table>
                 <tr><td><span>Part ${i+1}:</span></td></tr>
                 <tr><td style="line-height: 0; padding-bottom: 0.5em;"><span>${' -'.repeat(4)}</span></td></tr>
                 <tr><td><span>Start: </span></td><td><span>${start_timestamp}</span></td></tr>
+                <tr><td colspan = 2>
+                    <div class="${SELECTOR_BREAKS.slice(1)}">
+                        ${gui_break_str(start, star, breaks_filtered, resumes_filtered)}
+                    </div>
+                </td></tr>
                 <tr><td><span>End: </span></td><td><span>${star_timestamp}</span></td></tr>
             </table>
             <div>
                 <span>${' -'.repeat(8)}</span>
             </div>
             <div>
-                <span>Duration: </span><span ${star === undefined ? `class="${SELECTOR_IN_PROGRESS.slice(1)}"` : ''}>${duration}</span>
+                <span>Duration: </span><span ${star === undefined ? `class="${SELECTOR_IN_PROGRESS.slice(1)}" data-since="${start}"` : ''}>${duration}</span>
             </div>
         `;
 
@@ -313,19 +462,21 @@ const day_gui = (year, day) => {
     let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
     let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
 
-    let str = gui_str(starts, stars);
+    let str = gui_str(starts, stars, breaks, resumes);
 
     let sheet = document.styleSheets[1];
     gui_css_str().forEach(rule => sheet.insertRule(rule, sheet.cssRules.length));
 
     document.querySelector(SELECTOR_SIDEBAR).insertAdjacentHTML("afterEnd", str);
 
+
+    // ui refresh loop
     let _ = setInterval(() => {
-        let diffs = starts.map((start,i) => {
-            return stars[i] || Date.now() - start;
-        });
+        let diffs = starts.map((start,i) => (stars[i] || Date.now()) - start );
         document.querySelectorAll(SELECTOR_IN_PROGRESS).forEach((el, i) => {
-            let duration = time_formatted(diffs[i]);
+            let since = el.getAttribute("data-since");
+            let duration = time_formatted(Date.now() - since);
+            // let duration = time_formatted(diffs[i]);
             el.innerHTML = duration;
         });
         document.querySelectorAll(SELECTOR_TOTAL_IN_PROGRESS).forEach(el => {
@@ -333,8 +484,31 @@ const day_gui = (year, day) => {
             let total = time_formatted(sum);
             el.innerHTML = total;
         });
+
+        // let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
+        document.querySelectorAll(SELECTOR_BREAK_IN_PROGRESS).forEach((el) => {
+            let since = el.getAttribute("data-since");
+            let duration = time_formatted(Date.now() - since);
+            // let duration = time_formatted(break_diffs[i]);
+            el.innerHTML = duration;
+        });
+        document.querySelectorAll(SELECTOR_BREAK_TOTAL_IN_PROGRESS).forEach((el) => {
+            let since = el.getAttribute("data-since");
+            let star = el.getAttribute("data-star") || Date.now();
+            let filtered_resumes = resumes
+                    .filter(n => since <= n && n <= star)
+            let breaks_diff = breaks
+                    .filter(n => since <= n && n <= star)
+                    .map((n, i) => (filtered_resumes[i] || Date.now()) - n);
+            
+            let sum = breaks_diff.reduce((acc, n) => acc + n, 0);
+            let total = time_formatted(sum, true, 2);
+
+            el.innerHTML = total;
+        });
     }, 1000);
 
+    let divs_breaks = document.querySelectorAll(SELECTOR_BREAKS);
     let button_break = document.querySelector(SELECTOR_BUTTON_BREAK);
     let button_resume = document.querySelector(SELECTOR_BUTTON_RESUME);
 
@@ -348,6 +522,10 @@ const day_gui = (year, day) => {
         let on_break = breaks.length > resumes.length;
         set_visible(button_break, !on_break);
         set_visible(button_resume, on_break);
+
+        call_listeners(KEY_BREAKS, update_breaks);
+        call_listeners(KEY_RESUMES, update_breaks);
+
         set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
     });
     button_resume.addEventListener("click", (e) => {
@@ -356,8 +534,20 @@ const day_gui = (year, day) => {
         let on_break = breaks.length > resumes.length;
         set_visible(button_break, !on_break);
         set_visible(button_resume, on_break);
+
+        call_listeners(KEY_BREAKS, update_breaks);
+        call_listeners(KEY_RESUMES, update_breaks);
+
         set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
     });
+
+    const update_breaks = () => {
+        divs_breaks.forEach((el, i) => {
+            el.innerHTML = gui_break_str(starts[i], stars[i], breaks, resumes);
+        })
+    }
+    add_listener(KEY_BREAKS, update_breaks);
+    add_listener(KEY_RESUMES, update_breaks);
 };
 
 

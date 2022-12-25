@@ -149,7 +149,7 @@ const date_formatted = (date) => {
     const clock_delim = ":";
     // date = date.toLocaleString("en-ZA", {year: "numeric", month: "2-digit", day: "2-digit"})
     //         + "-" + date.toLocaleString("en-ZA", {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-    date = [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDay()].map(s => (""+s).padStart(2, '0')).join(date_delim)
+    date = [date.getUTCFullYear(), date.getUTCMonth()+1, date.getUTCDay()].map(s => (""+s).padStart(2, '0')).join(date_delim)
             + middle_delim
             + [date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()].map(s => (""+s).padStart(2, '0')).join(clock_delim)
     

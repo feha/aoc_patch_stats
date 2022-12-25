@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         aoc_patch_times
+// @name         aoc_patch_stats
 // @icon         https://adventofcode.com/favicon.png
 // @namespace    
 // @version      0.1

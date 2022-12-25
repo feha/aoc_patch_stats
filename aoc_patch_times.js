@@ -231,7 +231,7 @@ const gui_css_str = () => {
 
 const gui_str = (starts, stars, breaks, resumes) => {
     let diffs = starts.map((start,i) => {
-        return stars[i] || Date.now() - start;
+        return (stars[i] || Date.now()) - start;
     });
     let parts = starts.map((start,i) => {
         // `starts.map` ensures start is defined, but not the 'zipped' values.

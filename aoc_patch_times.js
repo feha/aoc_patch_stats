@@ -31,16 +31,20 @@ console.log("aoc_patch_times start!");
 
 const PARTS_PER_DAY = 2;
 
+const SELECTOR_TIMEKEEPING = ".timekeeping";
+const SELECTOR_TIMEKEEPING_INNER = SELECTOR_TIMEKEEPING + "-inner";
 const SELECTOR_IN_PROGRESS = ".in-progress";
 const SELECTOR_TOTAL_IN_PROGRESS = ".total-in-progress";
+const SELECTOR_BUTTON_BREAK_PARENT = ".button-parent";
 const SELECTOR_BUTTON_BREAK = ".button-break";
 const SELECTOR_BUTTON_RESUME = ".button-resume";
+const SELECTOR_STAR_COUNT = ".star-count"
 const SELECTOR_QUESTION = ".day-desc";
 const SELECTOR_SUCCESS = ".day-success";
 const SELECTOR_SUCCESS_STAR_COUNTER = "p";
 const SELECTOR_SIDEBAR = "#sidebar";
 
-const KEY_TIMEKEEPING = "timekeeping";
+const KEY_TIMEKEEPING = SELECTOR_TIMEKEEPING.slice(1);
 const KEY_STARTS = "starts";
 const KEY_STARS = "stars";
 const KEY_BREAKS = "breaks";
@@ -208,7 +212,7 @@ const gui_css_str = () => {
             padding-right: 2em;
         }`,
         /*css*/`
-        .button-parent {
+        ${SELECTOR_BUTTON_BREAK_PARENT} {
             display: grid;
             width: fit-content;
             grid-template-rows: repeat(auto-fit, minmax(0px, 0px));
@@ -256,7 +260,7 @@ const gui_str = (starts, stars, breaks, resumes) => {
                 <span>${' -'.repeat(8)}</span>
             </div>
             <div>
-                <span>Duration: </span><span ${star === undefined ? `class="in-progress"` : ''}>${duration}</span>
+                <span>Duration: </span><span ${star === undefined ? `class="${SELECTOR_IN_PROGRESS.slice(1)}"` : ''}>${duration}</span>
             </div>
         `;
 
@@ -269,14 +273,14 @@ const gui_str = (starts, stars, breaks, resumes) => {
     // `starts.length == stars.length` should only hold true when user completed the day.
     let complete = starts.length === stars.length;
 
-    let wrap_stars = str => `<span class="star-count">* </span>${str}<span class="star-count"> *</span>`;
+    let wrap_stars = str => `<span class="${SELECTOR_STAR_COUNT.slice(1)}">* </span>${str}<span class="${SELECTOR_STAR_COUNT.slice(1)}"> *</span>`;
     let state = complete ? 'Complete!' : 'In Progress';
     state = `<span>${state}</span>`;
     state = complete ? wrap_stars(state) : state;
 
     let str = /*html*/`
-        <div class="${KEY_TIMEKEEPING}">
-            <div class="${KEY_TIMEKEEPING}-inner">
+        <div class="${SELECTOR_TIMEKEEPING.slice(1)}">
+            <div class="${SELECTOR_TIMEKEEPING_INNER.slice(1)}">
                 <div>
                     ${parts.join('')}
                 </div>
@@ -284,15 +288,15 @@ const gui_str = (starts, stars, breaks, resumes) => {
                     <span>${'='.repeat(16)}</span>
                 </div>
                 <div>
-                    <span>State: </span>${state}
+                    <span>Status: </span>${state}
                 </div>
                 <div>
-                    <span>Total: </span><span class="total-in-progress">${total}</span>
+                    <span>Total: </span><span class="${SELECTOR_TOTAL_IN_PROGRESS.slice(1)}">${total}</span>
                 </div>
             </div>
-            <div class="button-parent">
-                <button class="button-break">Start Break!</button>
-                <button class="button-resume">Unbreak.</button>
+            <div class="${SELECTOR_BUTTON_BREAK_PARENT.slice(1)}">
+                <button class="${SELECTOR_BUTTON_BREAK.slice(1)}">Start Break!</button>
+                <button class="${SELECTOR_BUTTON_RESUME.slice(1)}">Unbreak.</button>
             </div>
         </div>
     `;

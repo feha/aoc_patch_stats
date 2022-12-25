@@ -242,7 +242,7 @@ const gui_str = (starts, stars, breaks, resumes) => {
 
         let star_timestamp = "In Progress";
         if (star !== undefined) {
-            let star_timestamp = date_formatted(new Date(star));
+            star_timestamp = date_formatted(new Date(star));
         } else {
             diff = Date.now() - start;
         }

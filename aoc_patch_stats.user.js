@@ -417,14 +417,15 @@ const gui_str = (starts, stars, breaks, resumes) => {
         return str;
     });
 
-    let sum = diffs.reduce((acc, n) => acc + n, 0);
-    let total = time_formatted(sum);
 
     let no_breaks = breaks.length == 0;
     let on_break = breaks.length > resumes.length;
     let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
     let sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
     let total_break = time_formatted(sum_breaks);
+
+    let sum = diffs.reduce((acc, n) => acc + n, 0) - sum_breaks;
+    let total = time_formatted(sum);
     
     // `starts.length == stars.length` should only hold true when user completed the day.
     let complete = starts.length === stars.length;
@@ -495,7 +496,9 @@ const day_gui = (year, day) => {
             el.textContent = duration;
         });
         document.querySelectorAll(SELECTOR_TOTAL_IN_PROGRESS).forEach(el => {
-            let sum = diffs.reduce((acc, n) => acc + n, 0);
+            let break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
+            let sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
+            let sum = diffs.reduce((acc, n) => acc + n, 0) - sum_breaks;
             let total = time_formatted(sum);
             el.textContent = total;
         });

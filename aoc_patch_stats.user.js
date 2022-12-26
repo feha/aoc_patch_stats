@@ -334,17 +334,12 @@ const gui_css_str = () => {
     ];
 };
 
-let break_opens = [];
 const gui_break_str = (start, star, breaks, resumes) => {
-    let no_breaks = breaks.length == 0;
-    let collapse_breaks = breaks.length > 1;
     let on_break = breaks.length > resumes.length;
 
-    // let breaks_diff = breaks.map((n, i) => (resumes[i] || Date.now()) - n);
     let breaks_diff = breaks.map((n, i) => (resumes[i] || Date.now()) - n);
     let breaks_diff_formatted = breaks.map((n, i) => time_formatted((resumes[i] || Date.now()) - n, true, 2));
 
-    let state = 'Ongoing';
     let entries = breaks.map((n, i) => {
         let in_progress = resumes[i] === undefined ? `class="${SELECTOR_BREAK_IN_PROGRESS.slice(1)}" data-since="${n}"` : '';
 
@@ -358,7 +353,7 @@ const gui_break_str = (start, star, breaks, resumes) => {
 
     let str = /*html*/`
         Breaks: <span ${on_break ? `class="${SELECTOR_BREAK_TOTAL_IN_PROGRESS.slice(1)}"` : ''} data-since="${start}" data-star="${star || ''}">${total}</span>
-        <details ${no_breaks ? 'hidden' : ''}>
+        <details>
             <summary></summary>
             <table ${dynamic_breaks}>
                 ${entries}
@@ -379,13 +374,15 @@ const gui_str = (starts, stars, breaks, resumes) => {
         let diff = diffs[i]; // likely NaN
 
         // Filter out breaks not in current part.
-        // Undefined behaviour when user claims to have been on break when they got a star.
+        // Undefined behaviour when user claims to have a star inbetween a breaks start and stop.
         // Because the script stops any ongoing break when receiving a star,
         // this should never happen without something like manually edited logs anyway.
         let breaks_filtered = breaks
                 .filter(n => start <= n && (!star || n <= star));
         let resumes_filtered = resumes
                 .filter(n => start <= n && (!star || n <= star));
+        
+        let no_breaks = breaks_filtered.length == 0;
 
         let start_timestamp = date_formatted(new Date(start));
 
@@ -402,7 +399,7 @@ const gui_str = (starts, stars, breaks, resumes) => {
                 <tr><td><span>Part ${i+1}:</span></td></tr>
                 <tr><td style="line-height: 0; padding-bottom: 0.5em;"><span>${' -'.repeat(4)}</span></td></tr>
                 <tr><td><span>Start: </span></td><td><span>${start_timestamp}</span></td></tr>
-                <tr><td colspan = 2>
+                <tr  ${no_breaks ? 'hidden' : ''}><td colspan = 2>
                     <div class="${SELECTOR_BREAKS.slice(1)}">
                         ${gui_break_str(start, star, breaks_filtered, resumes_filtered)}
                     </div>
@@ -423,6 +420,7 @@ const gui_str = (starts, stars, breaks, resumes) => {
     let sum = diffs.reduce((acc, n) => acc + n, 0);
     let total = time_formatted(sum);
 
+    let no_breaks = breaks.length == 0;
     let on_break = breaks.length > resumes.length;
     let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
     let sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
@@ -447,7 +445,7 @@ const gui_str = (starts, stars, breaks, resumes) => {
                 <div>
                     <span>Status: </span><span class="${SELECTOR_STATUS.slice(1)}">${status}</span>
                 </div>
-                <div style="color: #888">
+                <div style="color: #888" ${no_breaks ? 'hidden' : ''}>
                     <span>Breaks: </span><span class="${SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS.slice(1)}">${total_break}</span>
                 </div>
                 <div>
@@ -472,8 +470,14 @@ const day_gui = (year, day) => {
     let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
     let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
     let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
+    
+    // filter break logs, such that it's within [first start .. (last star if complete)]
+    let filtered_breaks = breaks
+            .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
+    let filtered_resumes = resumes
+            .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
 
-    let str = gui_str(starts, stars, breaks, resumes);
+    let str = gui_str(starts, stars, filtered_breaks, filtered_resumes);
 
     let sheet = document.styleSheets[1];
     gui_css_str().forEach(rule => sheet.insertRule(rule, sheet.cssRules.length));
@@ -488,39 +492,38 @@ const day_gui = (year, day) => {
             let since = el.getAttribute("data-since");
             let duration = time_formatted(Date.now() - since);
             // let duration = time_formatted(diffs[i]);
-            el.innerHTML = duration;
+            el.textContent = duration;
         });
         document.querySelectorAll(SELECTOR_TOTAL_IN_PROGRESS).forEach(el => {
             let sum = diffs.reduce((acc, n) => acc + n, 0);
             let total = time_formatted(sum);
-            el.innerHTML = total;
+            el.textContent = total;
         });
 
         document.querySelectorAll(SELECTOR_BREAK_IN_PROGRESS).forEach((el) => {
             let since = el.getAttribute("data-since");
             let duration = time_formatted(Date.now() - since);
-            // let duration = time_formatted(break_diffs[i]);
-            el.innerHTML = duration;
+            el.textContent = duration;
         });
         document.querySelectorAll(SELECTOR_BREAK_TOTAL_IN_PROGRESS).forEach((el) => {
             let since = el.getAttribute("data-since");
             let star = el.getAttribute("data-star") || Date.now();
-            let filtered_resumes = resumes
+            let filtered_filtered_resumes = filtered_resumes
                     .filter(n => since <= n && n <= star)
-            let breaks_diff = breaks
+            let breaks_diff = filtered_breaks
                     .filter(n => since <= n && n <= star)
-                    .map((n, i) => (filtered_resumes[i] || Date.now()) - n);
+                    .map((n, i) => (filtered_filtered_resumes[i] || Date.now()) - n);
             
             let sum = breaks_diff.reduce((acc, n) => acc + n, 0);
             let total = time_formatted(sum, true, 2);
 
-            el.innerHTML = total;
+            el.textContent = total;
         });
         document.querySelectorAll(SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS).forEach(el => {
-            let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
+            let break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
             let sum = break_diffs.reduce((acc, n) => acc + n, 0);
             let total = time_formatted(sum);
-            el.innerHTML = total;
+            el.textContent = total;
         });
     }, 1000);
 
@@ -528,14 +531,14 @@ const day_gui = (year, day) => {
     let button_break = document.querySelector(SELECTOR_BUTTON_BREAK);
     let button_resume = document.querySelector(SELECTOR_BUTTON_RESUME);
 
-    let on_break = breaks.length > resumes.length;
+    let on_break = filtered_breaks.length > filtered_resumes.length;
     set_visible(button_break, !on_break);
     set_visible(button_resume, on_break);
 
     const button_break_func = () => {
         // `starts.length == stars.length` should only hold true when user completed the day.
         let complete = starts.length === stars.length;
-        let on_break = breaks.length > resumes.length;
+        let on_break = filtered_breaks.length > filtered_resumes.length;
 
         set_visible(button_break, !on_break);
         set_visible(button_resume, on_break);
@@ -556,19 +559,50 @@ const day_gui = (year, day) => {
 
     const update_breaks = () => {
         divs_breaks.forEach((el, i) => {
-            el.innerHTML = gui_break_str(starts[i], stars[i], breaks, resumes);
+            let start = starts[i];
+            let star = stars[i]; // likely undefined
+            let filtered_filtered_breaks = filtered_breaks
+                    .filter(n => start <= n && n <= star)
+            let filtered_filtered_resumes = filtered_resumes
+                    .filter(n => start <= n && n <= star)
+            el.innerHTML = gui_break_str(start, star, filtered_filtered_breaks, filtered_filtered_resumes);
         })
     }
 
     button_break.addEventListener("click", (e) => {
+        // `starts.length == stars.length` should only hold true when user completed the day.
+        let complete = starts.length === stars.length;
+        if (complete) {
+            console.log(`[WARNING] BUTTON>RESUME> Warn(Code: 0): Already Complete, no reason to 'leak' peristent memory.`);
+
+            let old = button_break.textContent;
+            button_break.textContent = "Can't start break: Already Complete"
+            button_break.setAttribute('disabled', '')
+            setTimeout(() => {
+                button_break.textContent = old;
+            }, 2000);
+            return; // abort
+        }
+
         console.log(`BUTTON>BREAK: Storing break-log.`);
         breaks.push( Date.now() );
+        filtered_breaks = breaks
+                .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
 
         button_break_func();
     });
     button_resume.addEventListener("click", (e) => {
+        // `starts.length == stars.length` should only hold true when user completed the day.
+        let complete = starts.length === stars.length;
+        if (complete) {
+            console.log(`[WARNING] BUTTON>RESUME> Warn(Code: 0): Somehow tried to end a break when finished. THIS SHOULD BE IMPOSSIBLE STATE!!!`);
+            return; // abort
+        }
+        
         console.log(`BUTTON>RESUME: Storing resume-log.`);
         resumes.push( Date.now() );
+        filtered_resumes = resumes
+                .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
 
         button_break_func();
     });

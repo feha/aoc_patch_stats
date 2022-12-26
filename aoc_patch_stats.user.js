@@ -33,10 +33,12 @@ const PARTS_PER_DAY = 2;
 
 const SELECTOR_TIMEKEEPING = ".timekeeping";
 const SELECTOR_TIMEKEEPING_INNER = SELECTOR_TIMEKEEPING + "-inner";
+const SELECTOR_STATUS = ".status";
 const SELECTOR_IN_PROGRESS = ".in-progress";
 const SELECTOR_TOTAL_IN_PROGRESS = ".total-in-progress";
 const SELECTOR_BREAK_IN_PROGRESS = ".break-in-progress";
 const SELECTOR_BREAK_TOTAL_IN_PROGRESS = ".break-total-in-progress";
+const SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS = ".break-total-total-in-progress";
 const SELECTOR_IN_PROGRESS_BREAKS = ".in-progress-breaks";
 const SELECTOR_BREAKS = ".breaks";
 const SELECTOR_BUTTON_BREAK_PARENT = ".button-parent";
@@ -241,6 +243,8 @@ const waitForKeyElement = (selector, callback) => {
     }
 };
 
+let wrap_stars = str => `<span class="${SELECTOR_STAR_COUNT.slice(1)}">* </span>${str}<span class="${SELECTOR_STAR_COUNT.slice(1)}"> *</span>`;
+
 let listeners = {};
 const add_listener = (key, f) => {
     listeners[key] = listeners[key] || [];
@@ -418,14 +422,18 @@ const gui_str = (starts, stars, breaks, resumes) => {
 
     let sum = diffs.reduce((acc, n) => acc + n, 0);
     let total = time_formatted(sum);
+
+    let on_break = breaks.length > resumes.length;
+    let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
+    let sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
+    let total_break = time_formatted(sum_breaks);
     
     // `starts.length == stars.length` should only hold true when user completed the day.
     let complete = starts.length === stars.length;
 
-    let wrap_stars = str => `<span class="${SELECTOR_STAR_COUNT.slice(1)}">* </span>${str}<span class="${SELECTOR_STAR_COUNT.slice(1)}"> *</span>`;
-    let state = complete ? 'Complete!' : 'In Progress';
-    state = `<span>${state}</span>`;
-    state = complete ? wrap_stars(state) : state;
+    let status = complete ? 'Complete!' : on_break ? 'On Break...' : 'In Progress';
+    status = `<span>${status}</span>`;
+    status = complete ? wrap_stars(status) : status;
 
     let str = /*html*/`
         <div class="${SELECTOR_TIMEKEEPING.slice(1)}">
@@ -437,7 +445,10 @@ const gui_str = (starts, stars, breaks, resumes) => {
                     <span>${'='.repeat(16)}</span>
                 </div>
                 <div>
-                    <span>Status: </span>${state}
+                    <span>Status: </span><span class="${SELECTOR_STATUS.slice(1)}">${status}</span>
+                </div>
+                <div style="color: #888">
+                    <span>Breaks: </span><span class="${SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS.slice(1)}">${total_break}</span>
                 </div>
                 <div>
                     <span>Total: </span><span class="${SELECTOR_TOTAL_IN_PROGRESS.slice(1)}">${total}</span>
@@ -485,7 +496,6 @@ const day_gui = (year, day) => {
             el.innerHTML = total;
         });
 
-        // let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
         document.querySelectorAll(SELECTOR_BREAK_IN_PROGRESS).forEach((el) => {
             let since = el.getAttribute("data-since");
             let duration = time_formatted(Date.now() - since);
@@ -506,6 +516,12 @@ const day_gui = (year, day) => {
 
             el.innerHTML = total;
         });
+        document.querySelectorAll(SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS).forEach(el => {
+            let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
+            let sum = break_diffs.reduce((acc, n) => acc + n, 0);
+            let total = time_formatted(sum);
+            el.innerHTML = total;
+        });
     }, 1000);
 
     let divs_breaks = document.querySelectorAll(SELECTOR_BREAKS);
@@ -516,10 +532,11 @@ const day_gui = (year, day) => {
     set_visible(button_break, !on_break);
     set_visible(button_resume, on_break);
 
-    button_break.addEventListener("click", (e) => {
-        console.log(`BUTTON>BREAK: Storing break-log.`);
-        breaks.push( Date.now() );
+    const button_break_func = () => {
+        // `starts.length == stars.length` should only hold true when user completed the day.
+        let complete = starts.length === stars.length;
         let on_break = breaks.length > resumes.length;
+
         set_visible(button_break, !on_break);
         set_visible(button_resume, on_break);
 
@@ -527,25 +544,34 @@ const day_gui = (year, day) => {
         call_listeners(KEY_RESUMES, update_breaks);
 
         set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
-    });
-    button_resume.addEventListener("click", (e) => {
-        console.log(`BUTTON>RESUME: Storing resume-log.`);
-        resumes.push( Date.now() );
-        let on_break = breaks.length > resumes.length;
-        set_visible(button_break, !on_break);
-        set_visible(button_resume, on_break);
 
-        call_listeners(KEY_BREAKS, update_breaks);
-        call_listeners(KEY_RESUMES, update_breaks);
+        document.querySelectorAll(SELECTOR_STATUS).forEach(el => {
+            let status = complete ? 'Complete!' : on_break ? 'On Break...' : 'In Progress';
+            status = `<span>${status}</span>`;
+            status = complete ? wrap_stars(status) : status;
 
-        set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
-    });
+            el.innerHTML = status;
+        });
+    };
 
     const update_breaks = () => {
         divs_breaks.forEach((el, i) => {
             el.innerHTML = gui_break_str(starts[i], stars[i], breaks, resumes);
         })
     }
+
+    button_break.addEventListener("click", (e) => {
+        console.log(`BUTTON>BREAK: Storing break-log.`);
+        breaks.push( Date.now() );
+
+        button_break_func();
+    });
+    button_resume.addEventListener("click", (e) => {
+        console.log(`BUTTON>RESUME: Storing resume-log.`);
+        resumes.push( Date.now() );
+
+        button_break_func();
+    });
     add_listener(KEY_BREAKS, update_breaks);
     add_listener(KEY_RESUMES, update_breaks);
 };

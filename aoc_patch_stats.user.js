@@ -742,30 +742,61 @@ const main = () => {
                 
                 let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
                 let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
+                let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
+                let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
 
                 if (starts.length < stars.length) { // Error instead?
                     console.log(`[WARNING] LEADERBOARD> Warn(Code: 2): User somehow has more stars than starts.`);
-                    days = STORED_TIMEKEEPING[year] = {};
                 }
+                // From the nature of the stats, no relevant start is without a star.
                 let diffs = stars.map((end, i) => end - starts[i]);
 
                 
                 let parts_patched = parts.map((part, i) => {
-                    const format = ["yyyy", "mm", "dd", "hh", "mm", "ss", "000"];
-                    const delim = ":";
-                    const display_size = 3;
-                    let [diff, units] = time_length(diffs[i], format);
-                    if (diff !== undefined) {
+                    let start = starts[i];
+                    let star = stars[i];
+                    let diff = diffs[i];
+
+                    let part_patched = '';
+                    if (diff === undefined) {
+                        part_patched = part.match(re_time).slice(1)
+                                .map((cap, i) => {
+                                    if (i!==1) {
+                                        return cap;
+                                    }
+                                    return cap === '-' ? cap.padStart(9, ' ') + ' ' : `'${cap.padStart(8, ' ')}'`;
+                                })
+                                .join('');
+
+                    } else {
+                        // filter break logs such that they are within part's start and star (if complete).
+                        let filtered_breaks = breaks
+                            .filter(n => start <= n && (!star || n <= star));
+                        let filtered_resumes = resumes
+                            .filter(n => start <= n && (!star || n <= star));
+
+                        // From the nature of the stats, no ongoing part is displayed.
+                        // And from the nature of breaks, no break extend past a part in either direction.
+                        // So we can assume all breaks has a resume, and don't need to handle a case where the resume is undefined.
+                        let break_diffs = filtered_breaks.map((n, i) => filtered_resumes[i] - n );
+                        let sum = break_diffs.reduce((acc, n) => acc + n, 0);
+
+                        const format = ["yyyy", "mm", "dd", "hh", "mm", "ss", "000"];
+                        const delim = ":";
+                        const display_size = 3;
+                        let [duration, units] = time_length(diff - sum, format);
+
                         let idx_limit = units.findIndex(unit => unit.short == "h");
-                        idx_limit = Math.min(idx_limit, diff.length - display_size);
-                        diff = diff
+                        idx_limit = Math.min(idx_limit, duration.length - display_size);
+                        duration = duration
                                 .filter((_,i) => i >= idx_limit)
                                 .filter((_,i) => i < display_size)
-                                .join(delim).padStart(10, ' ');
+                                .join(delim).padStart(9, ' ');
+                        
+                        part_patched = part.match(re_time).slice(1)
+                                .map((cap, i) => i==1 ? duration + ' ' : cap )
+                                .join('');
                     }
-                    let part_patched = part.match(re_time).slice(1)
-                            .map((cap, i) => i==1 ? (diff || `'${cap}'`.padStart(10, ' ')) : cap )
-                            .join('');
                     return part_patched;
                 });
                 

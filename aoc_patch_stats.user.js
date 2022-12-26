@@ -474,9 +474,9 @@ const day_gui = (year, day) => {
     
     // filter break logs, such that it's within [first start .. (last star if complete)]
     let filtered_breaks = breaks
-            .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
+            .filter(n => Math.min(...starts) <= n && (stars.length < 2 || n <= Math.max(...stars)));
     let filtered_resumes = resumes
-            .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
+            .filter(n => Math.min(...starts) <= n && (stars.length < 2 || n <= Math.max(...stars)));
 
     let str = gui_str(starts, stars, filtered_breaks, filtered_resumes);
 
@@ -565,9 +565,9 @@ const day_gui = (year, day) => {
             let start = starts[i];
             let star = stars[i]; // likely undefined
             let filtered_filtered_breaks = filtered_breaks
-                    .filter(n => start <= n && n <= star)
+                    .filter(n => start <= n && (!star || n <= star));
             let filtered_filtered_resumes = filtered_resumes
-                    .filter(n => start <= n && n <= star)
+                    .filter(n => start <= n && (!star || n <= star));
             el.innerHTML = gui_break_str(start, star, filtered_filtered_breaks, filtered_filtered_resumes);
         })
     }
@@ -589,8 +589,9 @@ const day_gui = (year, day) => {
 
         console.log(`BUTTON>BREAK: Storing break-log.`);
         breaks.push( Date.now() );
+        // re-filter
         filtered_breaks = breaks
-                .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
+                .filter(n => Math.min(...starts) <= n && (stars.length < 2 || n <= Math.max(...stars)));
 
         button_break_func();
     });
@@ -604,8 +605,9 @@ const day_gui = (year, day) => {
         
         console.log(`BUTTON>RESUME: Storing resume-log.`);
         resumes.push( Date.now() );
+        // re-filter
         filtered_resumes = resumes
-                .filter(n => Math.min(starts) <= n && (stars.length == 0 || n <= Math.max(stars)));
+                .filter(n => Math.min(...starts) <= n && (stars.length < 2 || n <= Math.max(...stars)));
 
         button_break_func();
     });

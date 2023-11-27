@@ -22,6 +22,14 @@
 //       was released, so you have little control over its value.
 //      Not to mention how using it would collide with using the site normally...
 
+// TODO personal stats redrawing on storage change callback
+
+// TODO fix storage in proxy mode
+
+// TODO fix broadcastchannel affecting same tab that sent message
+
+// TODO clean up todo's and comments
+
 console.log("aoc_patch_times readied");
 // const script = (function(jnode) {
 (async function() {
@@ -44,9 +52,6 @@ const STORAGE_API_STRATEGY = {
     USE_LOCALSTORAGE: 'LOCALSTORAGE',
     NONE: 'none',
 };
-// TODO Add "BroadcastChannel" strategy (pretty much same as postMEssage: `new BroadcastChannel('test_channel').postMessage(somestr)`)
-// TODO  Main difference is that BroadcastChannel is same-origin, meaning other tabs and windows (on other domains) can't listen to it.
-// TODO consider adding "sessionstorage" strategy (pretty much same as "localstorage", will in some browsers (ie chrome) not work at all, and others only work per-window)
 const STORAGE_NOTIFY_STRATEGY = {
     BROADCASTCHANNEL: 'BroadcastChannel',
     GM_LISTENER: 'GM.addValueChangeListener',
@@ -95,16 +100,6 @@ const KEY_STARS = "stars";
 const KEY_BREAKS = "breaks";
 const KEY_RESUMES = "resumes";
 
-let get_stored_json = async (key) => {
-    // const v = window.localStorage.getItem(key);
-    const v = await GM.getValue(key, "{}");
-    return JSON.parse(v);
-}
-let set_stored_json = async (key, json) => {
-    // window.localStorage.setItem(key, JSON.stringify(json));
-    return GM.setValue(key, JSON.stringify(json));
-}
-
 
 /**
  * Initializes the storage mechanism based on availability.
@@ -114,9 +109,6 @@ let set_stored_json = async (key, json) => {
  * Also allows access to internal cache, get, set, and get_keys properties using the appropriate Symbol()'s.
  */
 function initialize_storage(sync_mode, notify_callback) {
-    
-    // TODO consider making the utility methods be closure, capturing values like api_strategy, or storage, to lower amount of arguments
-
     function parse_json_value(value, default_value) {
         try {
             return JSON.parse(value) || default_value;
@@ -146,7 +138,6 @@ function initialize_storage(sync_mode, notify_callback) {
     }
 
     // getter and setter that returns a getter and setter for desired api.
-    // TODO consider not having default values here.
     function storage_get_api(api_strategy) {
         switch (api_strategy) {
             case STORAGE_API_STRATEGY.USE_GM:
@@ -311,7 +302,7 @@ function initialize_storage(sync_mode, notify_callback) {
 
     function sync_storage(storage) {
         Object.keys(storage.cache).forEach(key => {
-            const old_value = undefined; // TODO an additional cache that was last seen in storage?
+            const old_value = undefined;
             const value = storage.cache[key];
             storage_mutation_callback(key, old_value, value);
         });
@@ -372,7 +363,8 @@ function initialize_storage(sync_mode, notify_callback) {
             case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
                 // TODO change "savedTab" to a listener for every key
                 // TODO look into how this listener handles deleted keys, or cleared storage
-                listener_id = GM.addValueChangeListener("savedTab", function(key, oldValue, newValue, remote) {
+                // TODO ALTERNATIVELY use last_modified key and sync everything
+                listener_id = GM.addValueChangeListener(STORAGE_LASTMODIFIED_KEY, function(key, oldValue, newValue, remote) {
                     listener(key, oldValue, newValue, remote)
                 });
                 break;
@@ -392,8 +384,6 @@ function initialize_storage(sync_mode, notify_callback) {
                     const key = event.key
                     const oldValue = event.oldValue
                     const newValue = event.newValue
-                    // TODO likely not going to be this simple. ie. might want to store all data in a single object in localstorage.
-                    // TODO  then it's not as easy to know which value was changed as the changed key points at the entire object.
                     listener(key, oldValue, newValue)
                 });
                 break;

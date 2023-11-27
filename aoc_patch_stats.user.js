@@ -11,6 +11,7 @@
 // @grant       GM.getValue
 // @grant       GM.setValue
 // @grant       GM.addValueChangeListener
+// @grant       GM_addStyle
 // @noframes
 //// @run-at document_end
 // ==/UserScript==
@@ -64,7 +65,7 @@ const STORAGE_SET_KEY = Symbol('set');
 const STORAGE_GETSTORAGEKEYS_KEY = Symbol('get_keys');
 const STORAGE_LASTMODIFIED_KEY = 'storage_last_modified'; // As this is meant to be stored in storage, it can't be a Symbol
 const STORAGE_PREFIX = `${GM.info.script.name}_`;
-const STORAGE_BROADCASTCHANNEL = `${STORAGE_PREFIX}_broadcastchannel`;
+const STORAGE_BROADCASTCHANNEL = `${STORAGE_PREFIX}broadcastchannel`;
 const STORAGE_SYNC_INTERVAL = 60000; // 60 seconds
 
 const PARTS_PER_DAY = 2;
@@ -143,28 +144,37 @@ function initialize_storage(sync_mode, notify_callback) {
                 return Promise.resolve(Object.keys(storage.cache));
         }
     }
+
+    // getter and setter that returns a getter and setter for desired api.
     // TODO consider not having default values here.
-    function storage_get_value_in_storage(api_strategy, key, default_value) {
+    function storage_get_api(api_strategy) {
         switch (api_strategy) {
             case STORAGE_API_STRATEGY.USE_GM:
-                try {
-                    return GM.getValue(key, default_value).then(value => parse_json_value(value));
-                } catch (error) {
-                    console.error(`Error getting value with GM.getValue: ${error}`);
-                    return Promise.reject(error);
+                return (key, default_value) => {
+                    try {
+                        // we can't know if it returned value or default_value,
+                        //  so can't tell when to parse and as such always parses.
+                        // So prepare default value for being parsed.
+                        const json_str = JSON.stringify(default_value);
+                        return GM.getValue(key, json_str)
+                            .then(value => parse_json_value(value));
+                    } catch (error) {
+                        console.error(`Error getting value with GM.getValue: ${error}`);
+                        return Promise.reject(error);
+                    }
                 }
             case STORAGE_API_STRATEGY.USE_LOCALSTORAGE:
-                // use a prefix for localstorage, to avoid conflicts
-                const prefixed_key = `${STORAGE_PREFIX}${key}`;
-                value = localStorage.getItem(prefixed_key);
-                // TODO Should instead check if key exists in localstorage. So "undefined", "null" and "false", etc. can be stored.
-                value = value ? parse_json_value(value) : default_value;
-                return Promise.resolve(value);
+                return (key, default_value) => {
+                    // use a prefix for localstorage, to avoid conflicts
+                    const prefixed_key = `${STORAGE_PREFIX}${key}`;
+                    value = localStorage.getItem(prefixed_key);
+                    value = value ? parse_json_value(value) : default_value;
+                    return Promise.resolve(value);
+                }
             default:
-                return Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to get value in storage.'));
+                return Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to set value in storage.'));
         }
     }
-    // TODO move last_modified updating + notify_ over here?
     function storage_set_api(api_strategy) {
         switch (api_strategy) {
             case STORAGE_API_STRATEGY.USE_GM:
@@ -184,7 +194,11 @@ function initialize_storage(sync_mode, notify_callback) {
                 return Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to set value in storage.'));
         }
     }
-    function storage_set_value_in_storage(api_strategy, notify_strategy, key, old_value, value) {
+    // getter and setter that hides away implementation strategies through a closure
+    function storage_get_value_in_storage(key, default_value) {
+        return storage_get_api(api_strategy)(key, default_value);
+    }
+    function storage_set_value_in_storage(key, old_value, value) {
         const json_str = JSON.stringify(value);
         return storage_set_api(api_strategy)(key, json_str)
             .then(() => {
@@ -198,7 +212,9 @@ function initialize_storage(sync_mode, notify_callback) {
                     });
             });
     }
-    function storage_get_value(api_strategy, storage, key, default_value) {
+
+    // getter and setter for the storage object (handles syncing both cache and persistent storage)
+    function storage_get_value(storage, key, default_value) {
         if (storage.cache.hasOwnProperty(key)) {
             return storage.cache[key] = storage.cache[key] || default_value;
         } else {
@@ -225,22 +241,21 @@ function initialize_storage(sync_mode, notify_callback) {
             // return value_promise;
         }
     }
-
-    function storage_mutation_callback(key, old_value, value) {
-        // save data to persistent storage (if one exists)
-        if (api_strategy != STORAGE_API_STRATEGY.NONE) {
-            storage_set_value_in_storage(api_strategy, notify_strategy, key, old_value, value);
-        }
-    }
-    
-    function storage_set_value(sync_mode, api_strategy, notify_strategy, storage, key, value) {
+    function storage_set_value(sync_mode, storage, key, value) {
         const old_value = storage[key];
         
         // always update cache, no matter which strategy
         storage.cache[key] = value;
 
-        if (sync_mode & STORAGE_SYNC_MODE.AUTO_PROXY != 0) {
-            storage_mutation_callback(api_strategy, notify_strategy, key, old_value, value);
+        if (sync_mode & STORAGE_SYNC_MODE.AUTO_PROXY) {
+            storage_mutation_callback(key, old_value, value);
+        }
+    }
+
+    function storage_mutation_callback(key, old_value, value) {
+        // save data to persistent storage (if one exists)
+        if (api_strategy != STORAGE_API_STRATEGY.NONE) {
+            storage_set_value_in_storage(key, old_value, value);
         }
     }
 
@@ -279,12 +294,12 @@ function initialize_storage(sync_mode, notify_callback) {
             obj1[key] = new_value;
         }
     }
-    function sync_cache(api_strategy, storage) {
+    function sync_cache(storage) {
         return storage.get_keys()
             .then(keys => {
                 return Promise.all(
                     keys.map(key => {
-                        return storage_get_value_in_storage(api_strategy, key, undefined)
+                        return storage_get_value_in_storage(key, undefined)
                             .then((value) => {
                                 console.log("sync_cache", key, value);
                                 sync_object_keeping_refs(storage.cache, {[key]: value}, key);
@@ -304,59 +319,38 @@ function initialize_storage(sync_mode, notify_callback) {
 
     function notify_tabs(api_strategy, notify_strategy, key, old_value, value) {
         if (api_strategy != STORAGE_API_STRATEGY.NONE && notify_strategy == STORAGE_NOTIFY_STRATEGY.NONE) {
-            // TODO ERROR and warn the user that storage can't be synced between tabs, and that they can overwrite each other
+            // TODO ERROR and warn the user that storage can't be synced between tabs,
+            // TODO  and that they can therefor overwrite each other
         }
-
-        switch (api_strategy) {
-            case STORAGE_API_STRATEGY.USE_GM:
-                switch (notify_strategy) {
-                    case STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL:
-                        const bc = new BroadcastChannel(STORAGE_BROADCASTCHANNEL);
-                        bc.postMessage({ key, old_value, value });
-                        console.log("posted");
-                        break;
-                    case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
-                        // An event is dispatched automatically by GM.setValue, no need to do it ourselves
-                        break;
-                    case STORAGE_NOTIFY_STRATEGY.POSTMESSAGE:
-                        // TODO any message sent is afaik visible to ALL  other scripts, in ALL windows.
-                        // TODO  might not want to send data (and instead only send a notif that it should read changes from storage),
-                        // TODO  or encrypt data before sending (as the key will be public in repo, this would be only be minor obfuscation).
-                        // TODO Same code for both strategies, maybe change to not use nested switch-statements?
-                        window.postMessage({ key, old_value, value }, window.location.origin);
-                        break;
-                    case STORAGE_NOTIFY_STRATEGY.LOCALSTORAGE:
-                        // TODO use localstorage somehow to trigger "storage" event artificially
-                        break;
-                    default:
-                        // Already handled
-                        break;
+        switch (notify_strategy) {
+            case STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL:
+                const bc = new BroadcastChannel(STORAGE_BROADCASTCHANNEL);
+                bc.postMessage({ key, old_value, value });
+                console.log("posted");
+                break;
+            case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
+                if (api_strategy == STORAGE_API_STRATEGY.USE_GM) {
+                    // An event is dispatched automatically by GM.setValue, no need to do it ourselves
+                } else {
+                    // TODO use GM.addValueChangeListener somehow to trigger "storage" event artificially
                 }
                 break;
-            case STORAGE_API_STRATEGY.USE_LOCALSTORAGE:
-                switch (notify_strategy) {
-                    case STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL: // TODO duplication. maybe not use nested switch case?
-                        const bc = new BroadcastChannel(STORAGE_BROADCASTCHANNEL);
-                        bc.postMessage({ key, old_value, value });
-                        console.log("posted2");
-                        break;
-                    case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
-                        // TODO use GM.addValueChangeListener somehow to trigger "storage" event artificially
-                        break;
-                    case STORAGE_NOTIFY_STRATEGY.POSTMESSAGE:
-                        window.postMessage({ key, old_value, value }, window.location.origin);
-                        break;
-                    case STORAGE_NOTIFY_STRATEGY.LOCALSTORAGE:
-                        // An event is dispatched automatically by localstorage, no need to do it ourselves
-                        break;
-                    default:
-                        // Already handled
-                        break;
+            case STORAGE_NOTIFY_STRATEGY.POSTMESSAGE:
+                // TODO any message sent is afaik visible to ALL  other scripts, in ALL windows.
+                // TODO  might not want to send data (and instead only send a notif that it should read changes from storage),
+                // TODO  or encrypt data before sending (as the key will be public in repo, this would be only be minor obfuscation).
+                // TODO Same code for both strategies, maybe change to not use nested switch-statements?
+                window.postMessage({ key, old_value, value }, window.location.origin);
+                break;
+            case STORAGE_NOTIFY_STRATEGY.LOCALSTORAGE:
+                if (api_strategy == STORAGE_API_STRATEGY.USE_LOCALSTORAGE) {
+                    // An event is dispatched automatically by localstorage, no need to do it ourselves
+                } else {
+                    // TODO use localstorage somehow to trigger "storage" event artificially
                 }
                 break;
             default:
-                // Handle the case where no strategy has been selected.
-                // Which in this case means do nothing (there's no storage to notify about).
+                // Already handled
                 break;
         }
     }
@@ -410,14 +404,14 @@ function initialize_storage(sync_mode, notify_callback) {
         return listener_id;
     }
     function listen_interval(storage, listener, all=true) {
-        storage_get_value_in_storage(api_strategy, STORAGE_LASTMODIFIED_KEY)
+        storage_get_value_in_storage(STORAGE_LASTMODIFIED_KEY)
             .then(currentModified => {
                 const lastModified = storage.cache[STORAGE_LASTMODIFIED_KEY] || 0;
                 if (currentModified === undefined || currentModified > lastModified) {
                     // Update last modification timestamp in cache
                     storage.cache[STORAGE_LASTMODIFIED_KEY] = currentModified; // consider //? old comment?
                     // Update last modification timestamp in storage
-                    storage_set_value_in_storage(api_strategy, notify_strategy, key, lastModified, currentModified);
+                    storage_set_value_in_storage(key, lastModified, currentModified);
                     
                     // Storage has changed, trigger the listener function
                     if (all) {
@@ -559,13 +553,12 @@ function initialize_storage(sync_mode, notify_callback) {
     storage.get_keys = function () {
         return storage_get_keys(api_strategy, storage);
     };
-    // getter and setter that hides away implementation strategies from user
     storage.get = function(key, default_value) {
-        return storage_get_value(api_strategy, storage, key, default_value);
+        return storage_get_value(storage, key, default_value);
     };
     storage.set = function(key, value) {
         console.log("set:", key);
-        return storage_set_value(sync_mode, api_strategy, notify_strategy, storage, key, value);
+        return storage_set_value(sync_mode, storage, key, value);
     };
     storage.sync = function() {
         sync_storage(storage);
@@ -573,7 +566,7 @@ function initialize_storage(sync_mode, notify_callback) {
 
 
     // Initialize the cache with current contents of storage
-    const syncing = sync_cache(api_strategy, storage)
+    const syncing = sync_cache(storage)
         .then(() => {
             let exposed_storage = storage;
             if (sync_mode & STORAGE_SYNC_MODE.AUTO_PROXY) {
@@ -594,7 +587,7 @@ function initialize_storage(sync_mode, notify_callback) {
     const storage_listener = (key, old_value, new_value, remote) => {
         if (remote === undefined || remote) {
             // update all
-            sync_cache(api_strategy, storage)
+            sync_cache(storage)
                 .then(() => {
                     // Notify user that storage was mutated by remote
                     notify_callback();
@@ -616,28 +609,21 @@ function initialize_storage(sync_mode, notify_callback) {
 }
 
 
-const notify_callback = () => {
-    
-    
-    // TODO invalidate and redraw gui (always? if needed? Easier to always do it)
-    // TODO sync_cache is an async promise
-};
-
-
-const sync_mode = STORAGE_SYNC_MODE.MANUAL;
-const storage = await initialize_storage(sync_mode, notify_callback);
-// TODO make a callback for when storage has mutated (at least from other tabs),
-// TODO the gui can then listen to this to invalidate itself.
-
-console.log("storage",storage);
-
-let STORED_TIMEKEEPING;
-if (sync_mode & ~STORAGE_SYNC_MODE.AUTO_PROXY) {
-    STORED_TIMEKEEPING = storage.get(KEY_TIMEKEEPING, {});
-} else {
-    STORED_TIMEKEEPING = storage[KEY_TIMEKEEPING] = storage[KEY_TIMEKEEPING] || {};
-}
-console.log("stored_timekeeping",STORED_TIMEKEEPING);
+// const notify_callback = () => {
+//     day_gui(year, day);
+// };
+// const sync_mode = STORAGE_SYNC_MODE.MANUAL;
+// const storage = await initialize_storage(sync_mode, notify_callback);
+// 
+// console.log("storage",storage);
+// 
+// let STORED_TIMEKEEPING;
+// if (sync_mode & ~STORAGE_SYNC_MODE.AUTO_PROXY) {
+//     STORED_TIMEKEEPING = storage.get(KEY_TIMEKEEPING, {});
+// } else {
+//     STORED_TIMEKEEPING = storage[KEY_TIMEKEEPING] = storage[KEY_TIMEKEEPING] || {};
+// }
+// console.log("stored_timekeeping",STORED_TIMEKEEPING);
 
 const aoc_url = "https://adventofcode.com";
 const aoc_year_url = (year) => aoc_url + `/${year}`;
@@ -829,11 +815,21 @@ const call_listeners = (key) => {
 //#endregion
 
 
+//#region gui
+
 const gui_css_str = () => {
     return [
         /*css*/`
         .hidden {
             visibility: hidden;
+        }`,
+        /*css*/`
+        #${GM.info.script.name}-sidebar {
+            float: right;
+            clear: right;
+            margin: 0 15px 2em 2em;
+            position: relative;
+            z-index: 10;
         }`,
         /*css*/`
         .${KEY_TIMEKEEPING} {
@@ -906,107 +902,148 @@ const gui_css_str = () => {
     ];
 };
 
-const gui_break_str = (start, star, breaks, resumes) => {
-    let on_break = breaks.length > resumes.length;
 
-    let breaks_diff = breaks.map((n, i) => (resumes[i] || Date.now()) - n);
-    let breaks_diff_formatted = breaks.map((n, i) => time_formatted((resumes[i] || Date.now()) - n, true, 2));
+const gui_str_break_item = (break_t, break_diff_formatted, resume_t) => {
+    const in_progress = resume_t === undefined ? `class="${SELECTOR_BREAK_IN_PROGRESS.slice(1)}" data-since="${break_t}"` : '';
 
-    let entries = breaks.map((n, i) => {
-        let in_progress = resumes[i] === undefined ? `class="${SELECTOR_BREAK_IN_PROGRESS.slice(1)}" data-since="${n}"` : '';
+    return /*html*/`
+        <tr>
+            <td class="td-right">
+                <span ${in_progress}>
+                    ${break_diff_formatted}
+                </span>
+                :
+            </td>
+            <td>
+                ${date_formatted(new Date(break_t))}
+            </td>
+        </tr>
+    `;
+};
 
-        return `<tr><td class="td-right"><span ${in_progress}>${breaks_diff_formatted[i]}</span> : </td><td>${date_formatted(new Date(n))}</td></tr>`;
-    }).join('');
+const gui_str_break_list = (start, star, breaks, resumes, open) => {
+    const dynamic_breaks = star == undefined ? `data-since="${start}" class="${SELECTOR_IN_PROGRESS_BREAKS}"` : '';
+    
+    const entries = breaks
+        .map((n, i) =>
+                gui_str_break_item(
+                    n,
+                    time_formatted((resumes[i] || Date.now()) - n, true, 2),
+                    resumes[i],
+                )
+            )
+        .join('');
 
-    let dynamic_breaks = star !== undefined ? '' : `data-since="${start}" class="${SELECTOR_IN_PROGRESS_BREAKS}"`
-
-    let sum = breaks_diff.reduce((acc, n) => acc + n, 0);
-    let total = time_formatted(sum);
-
-    let str = /*html*/`
-        Breaks: <span ${on_break ? `class="${SELECTOR_BREAK_TOTAL_IN_PROGRESS.slice(1)}"` : ''} data-since="${start}" data-star="${star || ''}">${total}</span>
-        <details>
+    return /*html*/`
+        <details ${open ? 'open' : ''}>
             <summary></summary>
             <table ${dynamic_breaks}>
                 ${entries}
             </table>
         </details>
     `;
+};
 
-    return str;
-}
+const state_parts=[];
+const gui_str_part = (part, start, star, breaks, resumes) => {
+    // `start` is ensured to be defined, but not any of the other fields.
 
-const gui_str = (starts, stars, breaks, resumes) => {
-    let diffs = starts.map((start,i) => {
-        return (stars[i] || Date.now()) - start;
-    });
-    let parts = starts.map((start,i) => {
-        // `starts.map` ensures start is defined, but not the 'zipped' values.
-        let star = stars[i]; // likely undefined
-        let diff = diffs[i]; // likely NaN
+    // // `starts.map` ensures start is defined, but not the 'zipped' values.
+    // let star = star; // likely undefined
+    let diff = (star || Date.now()) - start; // likely NaN
 
-        // Filter out breaks not in current part.
-        // Undefined behaviour when user claims to have a star inbetween a breaks start and stop.
-        // Because the script stops any ongoing break when receiving a star,
-        // this should never happen without something like manually edited logs anyway.
-        let breaks_filtered = breaks
-                .filter(n => start <= n && (!star || n <= star));
-        let resumes_filtered = resumes
-                .filter(n => start <= n && (!star || n <= star));
-        
-        let no_breaks = breaks_filtered.length == 0;
+    // Filter out breaks not in current part.
+    // Undefined behaviour when user claims to have a star inbetween a breaks start and stop.
+    // Because the script stops any ongoing break when receiving a star,
+    // this should never happen without something like manually edited logs anyway.
+    const breaks_filtered = breaks
+            .filter(n => start <= n && (!star || n <= star));
+    const resumes_filtered = resumes
+            .filter(n => start <= n && (!star || n <= star));
+    
+    const no_breaks = breaks_filtered.length == 0;
 
-        let start_timestamp = date_formatted(new Date(start));
+    const start_timestamp = date_formatted(new Date(start));
 
-        let star_timestamp = "In Progress";
-        if (star !== undefined) {
-            star_timestamp = date_formatted(new Date(star));
-        } else {
-            diff = Date.now() - start;
-        }
-        let duration = time_formatted(diff);
+    let star_timestamp = "In Progress";
+    if (star !== undefined) {
+        star_timestamp = date_formatted(new Date(star));
+    } else {
+        diff = Date.now() - start;
+    }
+    const duration = time_formatted(diff);
 
-        let str = /*html*/`
-            <table>
-                <tr><td><span>Part ${i+1}:</span></td></tr>
-                <tr><td style="line-height: 0; padding-bottom: 0.5em;"><span>${' -'.repeat(4)}</span></td></tr>
-                <tr><td><span>Start: </span></td><td><span>${start_timestamp}</span></td></tr>
-                <tr  ${no_breaks ? 'hidden' : ''}><td colspan = 2>
+    const on_break = breaks.length > resumes.length;
+    const breaks_diff = breaks.map((n, i) => (resumes[i] || Date.now()) - n);
+    const sum = breaks_diff.reduce((acc, n) => acc + n, 0);
+    const total = time_formatted(sum);
+    const open = (state_parts[part] = state_parts[part] || {}).open;
+
+    return /*html*/`
+        <table>
+            <tr><td><span>Part ${part}:</span></td></tr>
+            <tr><td style="line-height: 0; padding-bottom: 0.5em;"><span>
+                ${' -'.repeat(4)}
+            </span></td></tr>
+            <tr>
+                <td><span>Start: </span></td>
+                <td><span>
+                    ${start_timestamp}
+                </span></td>
+            </tr>
+            <tr  ${no_breaks ? 'hidden' : ''}>
+                <td colspan = 2>
                     <div class="${SELECTOR_BREAKS.slice(1)}">
-                        ${gui_break_str(start, star, breaks_filtered, resumes_filtered)}
+                        Breaks:
+                        <span ${on_break ? `class="${SELECTOR_BREAK_TOTAL_IN_PROGRESS.slice(1)}"` : ''} data-since="${start}" data-star="${star || ''}">
+                            ${total}
+                        </span>
+                        ${gui_str_break_list(start, star, breaks_filtered, resumes_filtered, open)}
                     </div>
-                </td></tr>
-                <tr><td><span>End: </span></td><td><span>${star_timestamp}</span></td></tr>
-            </table>
-            <div>
-                <span>${' -'.repeat(8)}</span>
-            </div>
-            <div>
-                <span>Duration: </span><span ${star === undefined ? `class="${SELECTOR_IN_PROGRESS.slice(1)}" data-since="${start}"` : ''}>${duration}</span>
-            </div>
-        `;
+                </td>
+            </tr>
+            <tr>
+                <td><span>End: </span></td>
+                <td><span>
+                    ${star_timestamp}
+                </span></td>
+            </tr>
+        </table>
+        <div>
+            <span>${' -'.repeat(8)}</span>
+        </div>
+        <div>
+            <span>Duration: </span>
+            <span ${star === undefined ? `class="${SELECTOR_IN_PROGRESS.slice(1)}" data-since="${start}"` : ''}>
+                ${duration}
+            </span>
+        </div>
+    `;
+};
+const gui_str_sidebar = (starts, stars, breaks, resumes) => {
+    const diffs = starts
+        .map((start,i) => (stars[i] || Date.now()) - start);
 
-        return str;
-    });
+    const parts = starts
+        .map((start,i) => gui_str_part(i, start, stars[i], breaks, resumes));
 
+    const no_breaks = breaks.length == 0;
+    const on_break = breaks.length > resumes.length;
+    const break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
+    const sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
+    const total_break = time_formatted(sum_breaks);
 
-    let no_breaks = breaks.length == 0;
-    let on_break = breaks.length > resumes.length;
-    let break_diffs = breaks.map((n, i) => (resumes[i] || Date.now()) - n );
-    let sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
-    let total_break = time_formatted(sum_breaks);
-
-    let sum = diffs.reduce((acc, n) => acc + n, 0) - sum_breaks;
-    let total = time_formatted(sum);
+    const sum = diffs.reduce((acc, n) => acc + n, 0) - sum_breaks;
+    const total = time_formatted(sum);
     
     // `starts.length == stars.length` should only hold true when user completed the day.
-    let complete = starts.length === stars.length;
+    const complete = starts.length === stars.length;
 
     let status = complete ? 'Complete!' : on_break ? 'On Break...' : 'In Progress';
     status = `<span>${status}</span>`;
     status = complete ? wrap_stars(status) : status;
 
-    let str = /*html*/`
+    return /*html*/`
         <div class="${SELECTOR_TIMEKEEPING.slice(1)}">
             <div class="${SELECTOR_TIMEKEEPING_INNER.slice(1)}">
                 <div>
@@ -1031,12 +1068,21 @@ const gui_str = (starts, stars, breaks, resumes) => {
             </div>
         </div>
     `;
-
-    return str;
 };
 
 
-const day_gui = (year, day) => {
+const day_gui = (year, day, clear = false) => {
+    let container;
+    if (clear) {
+        const container_id = `${GM.info.script.name}-sidebar`;
+        container = document.querySelector(`#${container_id}`);
+        container.parentNode.removeChild(container);
+    }
+    const sidebar = document.querySelector(SELECTOR_SIDEBAR);
+    const container_id = `${GM.info.script.name}-sidebar`;
+    sidebar.insertAdjacentHTML("afterEnd", `<div id="${container_id}"></div>`);
+    container = document.querySelector(`#${container_id}`);
+
     let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
     let timestamps = days[day] = (days[day] || {});
     let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
@@ -1050,24 +1096,35 @@ const day_gui = (year, day) => {
     let filtered_resumes = resumes
             .filter(n => Math.min(...starts) <= n && (stars.length < 2 || n <= Math.max(...stars)));
 
-    let str = gui_str(starts, stars, filtered_breaks, filtered_resumes);
 
-    let sheet = document.styleSheets[1];
-    gui_css_str().forEach(rule => sheet.insertRule(rule, sheet.cssRules.length));
+    // Apply CSS
+    gui_css_str().forEach(rule => GM.addStyle(rule));
+    // let sheet = document.styleSheets[1];
+    // gui_css_str().forEach(rule => sheet.insertRule(rule, sheet.cssRules.length));
 
-    document.querySelector(SELECTOR_SIDEBAR).insertAdjacentHTML("afterEnd", str);
+    // create gui
+    let str = gui_str_sidebar(starts, stars, filtered_breaks, filtered_resumes);
+    container.insertAdjacentHTML("beforeEnd", str);
+
+    
+    [...container.querySelectorAll("details")]
+        .map((el, i) => {
+            el.addEventListener("toggle", () => {
+                state_parts[i].open = el.hasAttribute("open");
+            });
+        });
 
 
     // ui refresh loop
     let _ = setInterval(() => {
         let diffs = starts.map((start,i) => (stars[i] || Date.now()) - start );
-        document.querySelectorAll(SELECTOR_IN_PROGRESS).forEach((el, i) => {
+        container.querySelectorAll(SELECTOR_IN_PROGRESS).forEach((el, i) => {
             let since = el.getAttribute("data-since");
             let duration = time_formatted(Date.now() - since);
             // let duration = time_formatted(diffs[i]);
             el.textContent = duration;
         });
-        document.querySelectorAll(SELECTOR_TOTAL_IN_PROGRESS).forEach(el => {
+        container.querySelectorAll(SELECTOR_TOTAL_IN_PROGRESS).forEach(el => {
             let break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
             let sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
             let sum = diffs.reduce((acc, n) => acc + n, 0) - sum_breaks;
@@ -1075,12 +1132,12 @@ const day_gui = (year, day) => {
             el.textContent = total;
         });
 
-        document.querySelectorAll(SELECTOR_BREAK_IN_PROGRESS).forEach((el) => {
+        container.querySelectorAll(SELECTOR_BREAK_IN_PROGRESS).forEach((el) => {
             let since = el.getAttribute("data-since");
             let duration = time_formatted(Date.now() - since);
             el.textContent = duration;
         });
-        document.querySelectorAll(SELECTOR_BREAK_TOTAL_IN_PROGRESS).forEach((el) => {
+        container.querySelectorAll(SELECTOR_BREAK_TOTAL_IN_PROGRESS).forEach((el) => {
             let since = el.getAttribute("data-since");
             let star = el.getAttribute("data-star") || Date.now();
             let filtered_filtered_resumes = filtered_resumes
@@ -1094,7 +1151,7 @@ const day_gui = (year, day) => {
 
             el.textContent = total;
         });
-        document.querySelectorAll(SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS).forEach(el => {
+        container.querySelectorAll(SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS).forEach(el => {
             let break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
             let sum = break_diffs.reduce((acc, n) => acc + n, 0);
             let total = time_formatted(sum);
@@ -1102,9 +1159,9 @@ const day_gui = (year, day) => {
         });
     }, 1000);
 
-    let divs_breaks = document.querySelectorAll(SELECTOR_BREAKS);
-    let button_break = document.querySelector(SELECTOR_BUTTON_BREAK);
-    let button_resume = document.querySelector(SELECTOR_BUTTON_RESUME);
+    let divs_breaks = container.querySelectorAll(SELECTOR_BREAKS);
+    let button_break = container.querySelector(SELECTOR_BUTTON_BREAK);
+    let button_resume = container.querySelector(SELECTOR_BUTTON_RESUME);
 
     let on_break = filtered_breaks.length > filtered_resumes.length;
     set_visible(button_break, !on_break);
@@ -1124,7 +1181,7 @@ const day_gui = (year, day) => {
         storage.sync();
         // set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
 
-        document.querySelectorAll(SELECTOR_STATUS).forEach(el => {
+        container.querySelectorAll(SELECTOR_STATUS).forEach(el => {
             let status = complete ? 'Complete!' : on_break ? 'On Break...' : 'In Progress';
             status = `<span>${status}</span>`;
             status = complete ? wrap_stars(status) : status;
@@ -1141,7 +1198,11 @@ const day_gui = (year, day) => {
                     .filter(n => start <= n && (!star || n <= star));
             let filtered_filtered_resumes = filtered_resumes
                     .filter(n => start <= n && (!star || n <= star));
-            el.innerHTML = gui_break_str(start, star, filtered_filtered_breaks, filtered_filtered_resumes);
+            el.innerHTML = gui_str_part(i, start, star, filtered_filtered_breaks, filtered_filtered_resumes);
+
+            el.querySelector("details").addEventListener("toggle", (ev) => {
+                state_parts[i].open = ev.target.hasAttribute("open");
+            });
         })
     }
 
@@ -1188,9 +1249,203 @@ const day_gui = (year, day) => {
     add_listener(KEY_RESUMES, update_breaks);
 };
 
+//#endregion
+
+
+const init_day = (year, day) => {
+    // opened question
+    let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
+    let timestamps = days[day] = (days[day] || {});
+
+    let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
+    let first_any = false;
+    document.body.querySelectorAll(SELECTOR_QUESTION).forEach((_, i) => {
+        let part = i+1;
+        let first = starts[i] === undefined;
+        first_any = first_any || first;
+
+        if (first) {
+            console.log(`TRIGGER>START>PART${part}>FIRST_OPEN: Storing timestamp.`);
+            
+            starts.push( Date.now() );
+        }
+        
+        let tail_length = starts.length - part;
+        if (first && tail_length !== 0) {
+            console.log(`[WARNING] TRIGGER>START> Warn(Code: 0): Somehow has ${tail_length} more parts on first open of part${part}."`);
+        }
+    });
+    if (!first_any && starts.length < PARTS_PER_DAY) {
+        console.log(`TRIGGER>START>RESUMING: Storing resume log is not automatic.`);
+        // let resume = timestamps[KEY_RESUMES] = timestamps[KEY_RESUMES] || [];
+        // resume.push( Date.now() );
+    }
+
+    day_gui(year, day);
+
+    storage.sync();
+}
+const init_answer_day = (year, day) => {
+    // gave answer
+    let days = STORED_TIMEKEEPING[year];
+    if (days === undefined) {
+        console.log(`[WARNING] TRIGGER>END> Warn(Code: 0): User somehow answered a year before starting it.`);
+        days = STORED_TIMEKEEPING[year] = {};
+    }
+
+    let timestamps = days[day];
+    if (timestamps === undefined) {
+        console.log(`[WARNING] TRIGGER>END> Warn(Code: 1): User somehow answered a day before starting it.`);
+        timestamps = days[day] = {}
+    }
+
+    let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
+    let star_count = stars.length;
+
+    let success = document.body.querySelector(SELECTOR_SUCCESS);
+    if (success === null) {
+        console.log("TRIGGER( END ): Incorrect answer.");
+    } else {
+        let count = document.body.querySelectorAll(SELECTOR_SUCCESS_STAR_COUNTER);
+
+        let diff = count.length - star_count;
+        if (diff < 0) {
+            console.log(`[WARNING] TRIGGER>END> Warn(Code: 2): User somehow has ${-diff} more stars than they solved.`);
+        } else if (diff >= 2) {
+            console.log(`[WARNING] TRIGGER>END> Warn(Code: 3): User somehow has more than one new star, for a total of ${diff}.`);
+        }
+
+        count.forEach((_, i) => {
+            let part = i+1;
+            let first = stars[i] === undefined;
+            if (part > star_count) {
+                console.log(`TRIGGER>END>PART${part}>NEW_STAR: Storing timestamp.`);
+                
+                stars.push( Date.now() );
+            }
+        });
+    }
+
+    storage.sync();
+}
+
+const init_stats = (year) => {
+    // stats
+    let days = STORED_TIMEKEEPING[year];
+    if (days === undefined) {
+        console.log(`[WARNING] LEADERBOARD> Warn(Code: 0): User has statistic for untracked year = ${year}`);
+        days = STORED_TIMEKEEPING[year] = {};
+    }
+    
+    let node = document.querySelector("pre").lastChild;
+
+    let lines = node.textContent.split('\n');
+
+    let re_pre = /^(\s+\d+).+$/
+    let re_day = /^\s+(\d+)$/
+    let re_parts = /\s*[^\s]+\s+[-\d]+\s+[-\d]+/g
+    let re_time = /(\s{2})\s*([^\s]+)(\s+[-\d]+\s+[-\d]+)/
+    let lines_patched = lines.map((line) => {
+        let pre = line.match(re_pre);
+        if (pre !== null) {
+            pre = pre[1];
+            let day = pre.match(re_day)[1];
+            let parts = line.slice(pre.length).match(re_parts);
+
+            let timestamps = days[day];
+            if (timestamps === undefined) {
+                console.log(`[WARNING] LEADERBOARD> Warn(Code: 1): User has statistic for untracked day = ${day}`);
+                timestamps = days[day] = {};
+            }
+            
+            let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
+            let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
+            let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
+            let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
+
+            if (starts.length < stars.length) { // Error instead?
+                console.log(`[WARNING] LEADERBOARD> Warn(Code: 2): User somehow has more stars than starts.`);
+            }
+            // From the nature of the stats, no relevant start is without a star.
+            let diffs = stars.map((end, i) => end - starts[i]);
+
+            
+            let parts_patched = parts.map((part, i) => {
+                let start = starts[i];
+                let star = stars[i];
+                let diff = diffs[i];
+
+                let part_patched = '';
+                if (diff === undefined) {
+                    part_patched = part.match(re_time).slice(1)
+                            .map((cap, i) => {
+                                if (i!==1) {
+                                    return cap;
+                                }
+                                return cap === '-' ? cap.padStart(9, ' ') + ' ' : `'${cap.padStart(8, ' ')}'`;
+                            })
+                            .join('');
+
+                } else {
+                    // filter break logs such that they are within part's start and star (if complete).
+                    let filtered_breaks = breaks
+                        .filter(n => start <= n && (!star || n <= star));
+                    let filtered_resumes = resumes
+                        .filter(n => start <= n && (!star || n <= star));
+
+                    // From the nature of the stats, no ongoing part is displayed.
+                    // And from the nature of breaks, no break extend past a part in either direction.
+                    // So we can assume all breaks has a resume, and don't need to handle a case where the resume is undefined.
+                    let break_diffs = filtered_breaks.map((n, i) => filtered_resumes[i] - n );
+                    let sum = break_diffs.reduce((acc, n) => acc + n, 0);
+
+                    const format = ["yyyy", "mm", "dd", "hh", "mm", "ss", "000"];
+                    const delim = ":";
+                    const display_size = 3;
+                    let [duration, units] = time_length(diff - sum, format);
+
+                    let idx_limit = units.findIndex(unit => unit.short == "h");
+                    idx_limit = Math.min(idx_limit, duration.length - display_size);
+                    duration = duration
+                            .filter((_,i) => i >= idx_limit)
+                            .filter((_,i) => i < display_size)
+                            .join(delim).padStart(9, ' ');
+                    
+                    part_patched = part.match(re_time).slice(1)
+                            .map((cap, i) => i==1 ? duration + ' ' : cap )
+                            .join('');
+                }
+                return part_patched;
+            });
+            
+            return pre + parts_patched.join('');
+        }
+        ""
+    }).join('\n');
+
+    node.textContent = lines_patched;
+}
+
+const init_page = (trigger_start, trigger_end, stats, year, day) => {
+    // opened question
+    if (trigger_start !== null) {
+        init_day(year, day);
+    }
+
+    // gave answer
+    if (trigger_end !== null) {
+        init_answer_day(year, day);
+    }
+
+    // stats
+    if (stats !== null) {
+        init_stats(year)
+    }
+}
+
 
 //#region entry-point
-
+let storage, STORED_TIMEKEEPING; // persistent data
 const main = () => {
     console.log("PRE_SUPER DEBUG:\n", { ...STORED_TIMEKEEPING });
     // local storage already retrieved
@@ -1200,190 +1455,36 @@ const main = () => {
     let trigger_end = location.href.match(aoc_trigger_end_regex);
     let stats = location.href.match(aoc_stats_regex);
 
-    // opened question
-    if (trigger_start !== null) {
-        let year = parseInt(trigger_start[1], 10);
-        let day = parseInt(trigger_start[2], 10);
+    // day, answer, or personal-stats webpage
+    let year, day;
+    let notify_callback
+    if (trigger_start !== null || trigger_end !== null) {
+        year = parseInt(trigger_start[1], 10);
+        day = parseInt(trigger_start[2], 10);
 
-        let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
-        let timestamps = days[day] = (days[day] || {});
+        notify_callback = () => {
+            day_gui(year, day, true);
+        };
+    } else if (stats !== null) {
+        year = parseInt(stats[1], 10);
 
-        let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
-        let first_any = false;
-        document.body.querySelectorAll(SELECTOR_QUESTION).forEach((_, i) => {
-            let part = i+1;
-            let first = starts[i] === undefined;
-            first_any = first_any || first;
-
-            if (first) {
-                console.log(`TRIGGER>START>PART${part}>FIRST_OPEN: Storing timestamp.`);
-                
-                starts.push( Date.now() );
-            }
-            
-            let tail_length = starts.length - part;
-            if (first && tail_length !== 0) {
-                console.log(`[WARNING] TRIGGER>START> Warn(Code: 0): Somehow has ${tail_length} more parts on first open of part${part}."`);
-            }
-        });
-        if (!first_any && starts.length < PARTS_PER_DAY) {
-            console.log(`TRIGGER>START>RESUMING: Storing resume log is not automatic.`);
-            // let resume = timestamps[KEY_RESUMES] = timestamps[KEY_RESUMES] || [];
-            // resume.push( Date.now() );
-        }
-
-        day_gui(year, day);
-
-        storage.sync();
-        // set_stored_json(KEY_TIMEKEEPING, { ...STORED_TIMEKEEPING }); // TODO why clone? Should be unneeded.
+        notify_callback = () => {
+            // TODO personal stats redraw
+        };
     }
 
-    // gave answer
-    if (trigger_end !== null) {
-        let year = parseInt(trigger_end[1], 10);
-        let day = parseInt(trigger_end[2], 10);
-
-        let days = STORED_TIMEKEEPING[year];
-        if (days === undefined) {
-            console.log(`[WARNING] TRIGGER>END> Warn(Code: 0): User somehow answered a year before starting it.`);
-            days = STORED_TIMEKEEPING[year] = {};
-        }
-
-        let timestamps = days[day];
-        if (timestamps === undefined) {
-            console.log(`[WARNING] TRIGGER>END> Warn(Code: 1): User somehow answered a day before starting it.`);
-            timestamps = days[day] = {}
-        }
-
-        let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
-        let star_count = stars.length;
-
-        let success = document.body.querySelector(SELECTOR_SUCCESS);
-        if (success === null) {
-            console.log("TRIGGER( END ): Incorrect answer.");
-        } else {
-            let count = document.body.querySelectorAll(SELECTOR_SUCCESS_STAR_COUNTER);
-
-            let diff = count.length - star_count;
-            if (diff < 0) {
-                console.log(`[WARNING] TRIGGER>END> Warn(Code: 2): User somehow has ${-diff} more stars than they solved.`);
-            } else if (diff >= 2) {
-                console.log(`[WARNING] TRIGGER>END> Warn(Code: 3): User somehow has more than one new star, for a total of ${diff}.`);
-            }
-
-            count.forEach((_, i) => {
-                let part = i+1;
-                let first = stars[i] === undefined;
-                if (part > star_count) {
-                    console.log(`TRIGGER>END>PART${part}>NEW_STAR: Storing timestamp.`);
-                    
-                    stars.push( Date.now() );
-                }
-            });
-        }
- 
-        storage.sync();
-        // set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
-    }
-
-    // stats
-    if (stats !== null) {
-        let year = parseInt(stats[1], 10);
-
-        let days = STORED_TIMEKEEPING[year];
-        if (days === undefined) {
-            console.log(`[WARNING] LEADERBOARD> Warn(Code: 0): User has statistic for untracked year = ${year}`);
-            days = STORED_TIMEKEEPING[year] = {};
-        }
+    const sync_mode = STORAGE_SYNC_MODE.MANUAL;
+    initialize_storage(sync_mode, notify_callback).then(data => {
+        storage = data;
         
-        let node = document.querySelector("pre").lastChild;
+        if (sync_mode & ~STORAGE_SYNC_MODE.AUTO_PROXY) {
+            STORED_TIMEKEEPING = storage.get(KEY_TIMEKEEPING, {});
+        } else {
+            STORED_TIMEKEEPING = storage[KEY_TIMEKEEPING] = storage[KEY_TIMEKEEPING] || {};
+        }
 
-        let lines = node.textContent.split('\n');
-
-        let re_pre = /^(\s+\d+).+$/
-        let re_day = /^\s+(\d+)$/
-        let re_parts = /\s*[^\s]+\s+[-\d]+\s+[-\d]+/g
-        let re_time = /(\s{2})\s*([^\s]+)(\s+[-\d]+\s+[-\d]+)/
-        let lines_patched = lines.map((line) => {
-            let pre = line.match(re_pre);
-            if (pre !== null) {
-                pre = pre[1];
-                let day = pre.match(re_day)[1];
-                let parts = line.slice(pre.length).match(re_parts);
-    
-                let timestamps = days[day];
-                if (timestamps === undefined) {
-                    console.log(`[WARNING] LEADERBOARD> Warn(Code: 1): User has statistic for untracked day = ${day}`);
-                    timestamps = days[day] = {};
-                }
-                
-                let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
-                let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
-                let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
-                let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
-
-                if (starts.length < stars.length) { // Error instead?
-                    console.log(`[WARNING] LEADERBOARD> Warn(Code: 2): User somehow has more stars than starts.`);
-                }
-                // From the nature of the stats, no relevant start is without a star.
-                let diffs = stars.map((end, i) => end - starts[i]);
-
-                
-                let parts_patched = parts.map((part, i) => {
-                    let start = starts[i];
-                    let star = stars[i];
-                    let diff = diffs[i];
-
-                    let part_patched = '';
-                    if (diff === undefined) {
-                        part_patched = part.match(re_time).slice(1)
-                                .map((cap, i) => {
-                                    if (i!==1) {
-                                        return cap;
-                                    }
-                                    return cap === '-' ? cap.padStart(9, ' ') + ' ' : `'${cap.padStart(8, ' ')}'`;
-                                })
-                                .join('');
-
-                    } else {
-                        // filter break logs such that they are within part's start and star (if complete).
-                        let filtered_breaks = breaks
-                            .filter(n => start <= n && (!star || n <= star));
-                        let filtered_resumes = resumes
-                            .filter(n => start <= n && (!star || n <= star));
-
-                        // From the nature of the stats, no ongoing part is displayed.
-                        // And from the nature of breaks, no break extend past a part in either direction.
-                        // So we can assume all breaks has a resume, and don't need to handle a case where the resume is undefined.
-                        let break_diffs = filtered_breaks.map((n, i) => filtered_resumes[i] - n );
-                        let sum = break_diffs.reduce((acc, n) => acc + n, 0);
-
-                        const format = ["yyyy", "mm", "dd", "hh", "mm", "ss", "000"];
-                        const delim = ":";
-                        const display_size = 3;
-                        let [duration, units] = time_length(diff - sum, format);
-
-                        let idx_limit = units.findIndex(unit => unit.short == "h");
-                        idx_limit = Math.min(idx_limit, duration.length - display_size);
-                        duration = duration
-                                .filter((_,i) => i >= idx_limit)
-                                .filter((_,i) => i < display_size)
-                                .join(delim).padStart(9, ' ');
-                        
-                        part_patched = part.match(re_time).slice(1)
-                                .map((cap, i) => i==1 ? duration + ' ' : cap )
-                                .join('');
-                    }
-                    return part_patched;
-                });
-                
-                return pre + parts_patched.join('');
-            }
-            ""
-        }).join('\n');
-
-        node.textContent = lines_patched;
-    }
+        init_page(trigger_start, trigger_end, stats, year, day)
+    });
 
     console.log("SUPER DEBUG:\n", STORED_TIMEKEEPING);
 };

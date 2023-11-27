@@ -11,7 +11,8 @@
 // @grant       GM.getValue
 // @grant       GM.setValue
 // @grant       GM.addValueChangeListener
-// @grant       GM_addStyle
+// @grant       GM_getTab
+// @grant       GM.addStyle
 // @noframes
 //// @run-at document_end
 // ==/UserScript==
@@ -26,7 +27,8 @@
 
 // TODO fix storage in proxy mode
 
-// TODO fix broadcastchannel affecting same tab that sent message
+// TODO cleanup logs
+// TODO ie. broadcastchannel
 
 // TODO clean up todo's and comments
 
@@ -71,6 +73,7 @@ const STORAGE_GETSTORAGEKEYS_KEY = Symbol('get_keys');
 const STORAGE_LASTMODIFIED_KEY = 'storage_last_modified'; // As this is meant to be stored in storage, it can't be a Symbol
 const STORAGE_PREFIX = `${GM.info.script.name}_`;
 const STORAGE_BROADCASTCHANNEL = `${STORAGE_PREFIX}broadcastchannel`;
+const STORAGE_UNIQUE_TAB = crypto.randomUUID();
 const STORAGE_SYNC_INTERVAL = 60000; // 60 seconds
 
 const PARTS_PER_DAY = 2;
@@ -315,8 +318,9 @@ function initialize_storage(sync_mode, notify_callback) {
         }
         switch (notify_strategy) {
             case STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL:
+                const remote = STORAGE_UNIQUE_TAB;
                 const bc = new BroadcastChannel(STORAGE_BROADCASTCHANNEL);
-                bc.postMessage({ key, old_value, value });
+                bc.postMessage({ remote, key, old_value, value });
                 console.log("posted");
                 break;
             case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
@@ -353,11 +357,10 @@ function initialize_storage(sync_mode, notify_callback) {
             case STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL:
                 // Listen for messages from other tabs
                 const bc = new BroadcastChannel(STORAGE_BROADCASTCHANNEL);
-                console.log("listen")
                 listener_id = bc.addEventListener('message', (event) => {
                     console.log("received", event)
-                    const { key, oldValue, newValue } = event.data;
-                    listener(key, oldValue, newValue, true); // postMessage only triggers other tab
+                    const { remote, key, oldValue, newValue } = event.data;
+                    listener(key, oldValue, newValue, remote != STORAGE_UNIQUE_TAB); // postMessage only triggers other tab
                 });
                 break;
             case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
@@ -575,6 +578,7 @@ function initialize_storage(sync_mode, notify_callback) {
     
     // Listen for storage changes
     const storage_listener = (key, old_value, new_value, remote) => {
+        console.log(remote)
         if (remote === undefined || remote) {
             // update all
             sync_cache(storage)

@@ -23,9 +23,9 @@
 //       was released, so you have little control over its value.
 //      Not to mention how using it would collide with using the site normally...
 
-// TODO personal stats redrawing on storage change callback
-
-// TODO fix storage in proxy mode
+// TODO fix storage in proxy mode. There are a couple issues with using proxies:
+// TODO they seem to try to index promises ".then" for some reason
+// TODO and bunch of other stuff
 
 // TODO cleanup logs
 // TODO ie. broadcastchannel
@@ -45,10 +45,10 @@ const STORAGE_SYNC_MODE = {}
 STORAGE_SYNC_MODE.MANUAL= 1 << 0;
 // setting an index in storage writes to persistent storage:
 // storage[foo] = foobar
-STORAGE_SYNC_MODE.AUTO_PROXY= 1 << 2;
+STORAGE_SYNC_MODE.AUTO_PROXY= 1 << 1;
 // setting an index in storage (recursively for nested objects) writes to persistent storage:
 // storage[foo][bar] = foobar
-STORAGE_SYNC_MODE.RECURSE_AUTO_PROXY= 1 << 3 | STORAGE_SYNC_MODE.AUTO_PROXY; //! broken
+STORAGE_SYNC_MODE.RECURSE_AUTO_PROXY= 1 << 2 | STORAGE_SYNC_MODE.AUTO_PROXY; //! broken
 const STORAGE_API_STRATEGY = {
     USE_GM: 'GM.*',
     USE_LOCALSTORAGE: 'LOCALSTORAGE',
@@ -67,9 +67,11 @@ const STORAGE_NOTIFY_STRATEGY = {
 //#region Settings/constants/templates
 
 const STORAGE_CACHE_KEY = Symbol('cache');
+const STORAGE_GETSTORAGEKEYS_KEY = Symbol('get_keys');
 const STORAGE_GET_KEY = Symbol('get');
 const STORAGE_SET_KEY = Symbol('set');
-const STORAGE_GETSTORAGEKEYS_KEY = Symbol('get_keys');
+const STORAGE_SYNC_KEY = Symbol('sync');
+const STORAGE_RECURSIVE_PROXY_KEY = Symbol('recurse_proxy');
 const STORAGE_LASTMODIFIED_KEY = 'storage_last_modified'; // As this is meant to be stored in storage, it can't be a Symbol
 const STORAGE_PREFIX = `${GM.info.script.name}_`;
 const STORAGE_BROADCASTCHANNEL = `${STORAGE_PREFIX}broadcastchannel`;
@@ -80,6 +82,8 @@ const PARTS_PER_DAY = 2;
 
 const SELECTOR_TIMEKEEPING = ".timekeeping";
 const SELECTOR_TIMEKEEPING_INNER = SELECTOR_TIMEKEEPING + "-inner";
+const SELECTOR_PART_START = ".part-start";
+const SELECTOR_PART_END = ".part-end";
 const SELECTOR_STATUS = ".status";
 const SELECTOR_IN_PROGRESS = ".in-progress";
 const SELECTOR_TOTAL_IN_PROGRESS = ".total-in-progress";
@@ -88,6 +92,7 @@ const SELECTOR_BREAK_TOTAL_IN_PROGRESS = ".break-total-in-progress";
 const SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS = ".break-total-total-in-progress";
 const SELECTOR_IN_PROGRESS_BREAKS = ".in-progress-breaks";
 const SELECTOR_BREAKS = ".breaks";
+const SELECTOR_BREAKS_ACTIVE = ".breaks:not([hidden])";
 const SELECTOR_BUTTON_BREAK_PARENT = ".button-parent";
 const SELECTOR_BUTTON_BREAK = ".button-break";
 const SELECTOR_BUTTON_RESUME = ".button-resume";
@@ -97,21 +102,41 @@ const SELECTOR_SUCCESS = ".day-success";
 const SELECTOR_SUCCESS_STAR_COUNTER = "p";
 const SELECTOR_SIDEBAR = "#sidebar";
 
+const ATTR_DATA_START = "data-start";
+const ATTR_DATA_END = "data-end";
+const ATTR_DATA_SINCE = "data-since";
+const ATTR_DATA_STAR = "data-star";
+
 const KEY_TIMEKEEPING = SELECTOR_TIMEKEEPING.slice(1);
 const KEY_STARTS = "starts";
 const KEY_STARS = "stars";
 const KEY_BREAKS = "breaks";
 const KEY_RESUMES = "resumes";
 
+const aoc_url = "https://adventofcode.com";
+const aoc_year_url = (year) => aoc_url + `/${year}`;
+const aoc_day_url = (year, day) => aoc_year_params(year) + `/day/${day}`;
+const aoc_input_url = (year, day) => aoc_day_params(year, day) + `/input`;
+const aoc_answer_url = (year, day) => aoc_day_params(year, day) + `/answer`;
+
+const aoc_trigger_start_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/day/(\\d+)/?(#[^/]*)*');
+const aoc_trigger_end_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/day/(\\d+)/answer/?$');
+const aoc_leaderboard_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/leaderboard.*');
+const aoc_stats_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/leaderboard/self/?$');
+
+//#endregion
+
+
+//#region Storage utils
 
 /**
  * Initializes the storage mechanism based on availability.
  * Uses GM.setValue/GM.getValue or localStorage.
  * Handles synchronization between multiple tabs.
- * @returns {Object} Storage object using setter and getter to hide usage of cache- and api-usage.
+ * @returns {Object} Storage object, or a proxy (hiding any usage of cache- and api-usage) if sync_mode is not MANUAL.
  * Also allows access to internal cache, get, set, and get_keys properties using the appropriate Symbol()'s.
  */
-function initialize_storage(sync_mode, notify_callback) {
+function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_callback) {
     function parse_json_value(value, default_value) {
         try {
             return JSON.parse(value) || default_value;
@@ -151,7 +176,7 @@ function initialize_storage(sync_mode, notify_callback) {
                         // So prepare default value for being parsed.
                         const json_str = JSON.stringify(default_value);
                         return GM.getValue(key, json_str)
-                            .then(value => parse_json_value(value));
+                            .then(value => value !== undefined ? parse_json_value(value) : default_value);
                     } catch (error) {
                         console.error(`Error getting value with GM.getValue: ${error}`);
                         return Promise.reject(error);
@@ -166,7 +191,7 @@ function initialize_storage(sync_mode, notify_callback) {
                     return Promise.resolve(value);
                 }
             default:
-                return Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to set value in storage.'));
+                return () => Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to set value in storage.'));
         }
     }
     function storage_set_api(api_strategy) {
@@ -185,7 +210,7 @@ function initialize_storage(sync_mode, notify_callback) {
                     }
                 }
             default:
-                return Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to set value in storage.'));
+                return () => Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to set value in storage.'));
         }
     }
     // getter and setter that hides away implementation strategies through a closure
@@ -193,6 +218,7 @@ function initialize_storage(sync_mode, notify_callback) {
         return storage_get_api(api_strategy)(key, default_value);
     }
     function storage_set_value_in_storage(key, old_value, value) {
+        console.log("storage_set_value_in_storage", key, old_value, value)
         const json_str = JSON.stringify(value);
         return storage_set_api(api_strategy)(key, json_str)
             .then(() => {
@@ -295,7 +321,6 @@ function initialize_storage(sync_mode, notify_callback) {
                     keys.map(key => {
                         return storage_get_value_in_storage(key, undefined)
                             .then((value) => {
-                                console.log("sync_cache", key, value);
                                 sync_object_keeping_refs(storage.cache, {[key]: value}, key);
                             })
                     })
@@ -320,8 +345,9 @@ function initialize_storage(sync_mode, notify_callback) {
             case STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL:
                 const remote = STORAGE_UNIQUE_TAB;
                 const bc = new BroadcastChannel(STORAGE_BROADCASTCHANNEL);
-                bc.postMessage({ remote, key, old_value, value });
-                console.log("posted");
+                bc.postMessage({ remote, key });
+                // bc.postMessage({ remote, key, old_value, value });
+                console.log("posted notification");
                 break;
             case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
                 if (api_strategy == STORAGE_API_STRATEGY.USE_GM) {
@@ -358,7 +384,7 @@ function initialize_storage(sync_mode, notify_callback) {
                 // Listen for messages from other tabs
                 const bc = new BroadcastChannel(STORAGE_BROADCASTCHANNEL);
                 listener_id = bc.addEventListener('message', (event) => {
-                    console.log("received", event)
+                    // const { remote, key } = event.data;
                     const { remote, key, oldValue, newValue } = event.data;
                     listener(key, oldValue, newValue, remote != STORAGE_UNIQUE_TAB); // postMessage only triggers other tab
                 });
@@ -402,9 +428,7 @@ function initialize_storage(sync_mode, notify_callback) {
                 const lastModified = storage.cache[STORAGE_LASTMODIFIED_KEY] || 0;
                 if (currentModified === undefined || currentModified > lastModified) {
                     // Update last modification timestamp in cache
-                    storage.cache[STORAGE_LASTMODIFIED_KEY] = currentModified; // consider //? old comment?
-                    // Update last modification timestamp in storage
-                    storage_set_value_in_storage(key, lastModified, currentModified);
+                    storage.cache[STORAGE_LASTMODIFIED_KEY] = currentModified;
                     
                     // Storage has changed, trigger the listener function
                     if (all) {
@@ -425,31 +449,34 @@ function initialize_storage(sync_mode, notify_callback) {
             [STORAGE_GET_KEY]: storage.get,
             [STORAGE_SET_KEY]: storage.set,
             [STORAGE_GETSTORAGEKEYS_KEY]: storage.get_keys,
-            sync: () => storage.sync,
-            ...storage,
+            [STORAGE_SYNC_KEY]: () => storage.sync,
         };
         return storage_hide_internals;
     }
 
-    function storage_create_proxy(storage_hide_internals, recursive_mutation_callback) {
+    function storage_create_proxy(obj, recursive_mutation_callback) {
+        // // identifier to be able to know object is a proxy, so we don't wrap proxies
+        // obj[STORAGE_RECURSIVE_PROXY_KEY] = true;
+
         // Do not forward the internal symbols. Allows to ie. explicitly index value in storage.cache
         const internals = [
-            ...Object.keys(storage_hide_internals),
-            ...Object.getOwnPropertySymbols(storage_hide_internals)
+            ...Object.keys(obj),
+            ...Object.getOwnPropertySymbols(obj)
         ];
-        console.log(internals)
+        let proxy;
 
-        let as_obj_or_proxy = (obj) => obj;
+        let as_obj_or_proxy = (obj2) => obj2;
         if (typeof recursive_mutation_callback !== 'undefined' && typeof recursive_mutation_callback === 'function') {
-            console.log("recursive_mutation_callback")
-            as_obj_or_proxy = (obj, proxy, key) => {
+            as_obj_or_proxy = (obj2, key, target) => {
+                let obj_as_proxy = obj2;
                 const set_callback = () => {
-                    // guard against the key having been reassigned and the callback was from an old value
-                    if (proxy[key] === obj) {
-                        recursive_mutation_callback(key, undefined, obj)
+                    //! gets a new proxy object each time, wont work
+                    if (proxy[key] === obj2 || proxy[key] === obj_as_proxy) {
+                        recursive_mutation_callback(key, undefined, obj_as_proxy)
                     }
                 };
-                return create_recursive_proxy(set_callback, obj);
+                obj_as_proxy = create_recursive_proxy(set_callback, obj2); // need to update "obj" to the proxy, as Proxy(obj) !== obj
+                return obj_as_proxy;
             }
         }
         // if (typeof propagate !== 'undefined') {
@@ -463,15 +490,14 @@ function initialize_storage(sync_mode, notify_callback) {
         //     };
         //     value = create_recursive_proxy(set_callback, value);
         // }
-        const proxy = new Proxy(storage_hide_internals, {
+        const handler = {
             get: function(target, prop) {
-                console.log("get", prop)
                 if (internals.includes(prop)) {
-                    console.log("internals", prop)
                     return target[prop];
                 }
                 let value = target[STORAGE_GET_KEY](prop);
-                value = as_obj_or_proxy(value, proxy, prop);
+                value = as_obj_or_proxy(value, prop, target);
+                target[STORAGE_SET_KEY](prop, value);
                 // call .storage_get_value
                 return value;
             },
@@ -480,67 +506,66 @@ function initialize_storage(sync_mode, notify_callback) {
                     target[prop] = value;
                     return true;
                 }
-                value = as_obj_or_proxy(value, proxy, prop);
+                // value = as_obj_or_proxy(value, prop);
                 // call .storage_set_value
                 target[STORAGE_SET_KEY](prop, value);
                 return true;
             },
-        });
+        };
+        proxy = new Proxy(obj, handler);
         
         return proxy;
     }
 
     function create_recursive_proxy(set_callback, obj) {
-        console.log("create_recursive_proxy")
         if (typeof obj === 'object') {
-            // proxy future values
-            obj = new Proxy(obj, {
-                get: function(target, prop) {
-                    let value = target[prop];
-                    value = create_recursive_proxy(set_callback, value);
-                    return value;
-                },
-                set: function(target, prop, value) {
-                    if (target[prop] !== value) {
-                        target[prop] = create_recursive_proxy(set_callback, value);
-                        set_callback(); // notify storage
-                    }
-                    return true;
-                },
-            });
+            if (obj[STORAGE_RECURSIVE_PROXY_KEY]) {
+                // Already a proxy, don't wrap
+                return obj;
+            } else {
+                // Create a proxy that proxies future values in this object, recursively
+                const internals = [
+                    STORAGE_RECURSIVE_PROXY_KEY,
+                ];
+
+                const handler = {
+                    get: function(target, prop) {
+                        if (internals.includes(prop)) {
+                            return handler[prop];
+                        }
+                        let value = target[prop];
+                        value = create_recursive_proxy(set_callback, value);
+                        return value;
+                    },
+                    set: function(target, prop, value) {
+                        if (internals.includes(prop)) {
+                            handler[prop] = value;
+                            return true;
+                        }
+                        if (target[prop] !== value) {
+                            // value = create_recursive_proxy(set_callback, value);
+                            target[prop] = value;
+                            set_callback(); // notify storage
+                        }
+                        return true;
+                    },
+                    // identifier to be able to know object is already a proxy, to avoid proxying the proxy.
+                    [STORAGE_RECURSIVE_PROXY_KEY]: true,
+                };
+                obj = new Proxy(obj, handler);
+            }
         }
         
         return obj;
     }
+    
+    if (api_strategy == STORAGE_API_STRATEGY.NONE) {
+        // Warn if neither option is available
+        console.error('[WARNING] LocalStorage and GM.setValue/GM.getValue are not available, unable to load/store data. Using temporary cache for now');
+    }
 
     const storage = {};
     storage.cache = {};
-
-    const exists_GM = typeof GM !== 'undefined' && typeof GM.setValue !== 'undefined' && typeof GM.getValue !== 'undefined';
-    const exists_GM_Listener = exists_GM && typeof GM.addValueChangeListener !== 'undefined';
-    const exists_localstorage = typeof localStorage !== 'undefined'
-
-    // strategy for which api to handle persistent data with
-    let api_strategy = STORAGE_API_STRATEGY.NONE
-    // Use GM.setValue and GM.getValue if available
-    if (exists_GM) {
-        api_strategy = STORAGE_API_STRATEGY.USE_GM;
-    }
-    // Fall back to localStorage
-    if (!exists_GM && exists_localstorage) {
-        api_strategy = STORAGE_API_STRATEGY.USE_LOCALSTORAGE;
-    }
-
-    if (api_strategy == STORAGE_API_STRATEGY.NONE) {
-        // Warn if neither option is available
-        console.error('LocalStorage and GM.setValue/GM.getValue are not available, unable to load/store data. Using temporary cache for now');
-    }
-
-    // strategy for notifying tabs
-    let notify_strategy = STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL
-    // if (exists_GM_Listener) {
-    //     notify_strategy = STORAGE_NOTIFY_STRATEGY.GM_LISTENER
-    // }
 
     // Get all keys in storage
     storage.get_keys = function () {
@@ -550,7 +575,6 @@ function initialize_storage(sync_mode, notify_callback) {
         return storage_get_value(storage, key, default_value);
     };
     storage.set = function(key, value) {
-        console.log("set:", key);
         return storage_set_value(sync_mode, storage, key, value);
     };
     storage.sync = function() {
@@ -566,7 +590,7 @@ function initialize_storage(sync_mode, notify_callback) {
                 exposed_storage = storage_hide_internals(storage);
                 let mutation_callback;
                 if (sync_mode == STORAGE_SYNC_MODE.RECURSE_AUTO_PROXY) {
-                    mutation_callback = (key, old_value, value) => storage_mutation_callback(api_strategy, notify_strategy, key, old_value, value)
+                    mutation_callback = (key, old_value, value) => storage_mutation_callback(key, old_value, value)
                 }
                 // Return a proxy for the storage object
                 exposed_storage = storage_create_proxy(exposed_storage, mutation_callback);    
@@ -576,59 +600,33 @@ function initialize_storage(sync_mode, notify_callback) {
             return exposed_storage;
         });
     
-    // Listen for storage changes
-    const storage_listener = (key, old_value, new_value, remote) => {
-        console.log(remote)
-        if (remote === undefined || remote) {
-            // update all
-            sync_cache(storage)
-                .then(() => {
-                    // Notify user that storage was mutated by remote
-                    notify_callback();
-                });
-            // // update only changed key
-            // const value = JSON.parse(new_value);
-            // storage.cache[key] = value;
-        }
-    };
-        
-    listen_notify(notify_strategy, storage_listener);
-
-    // setInterval strategy. Always fallbacks on this just-in-case there's some undetected issue
-    setInterval(() => {
-        listen_interval(storage, storage_listener);
-    }, STORAGE_SYNC_INTERVAL);
+    // Listen for storage changes, if there's an api-strategy
+    if (api_strategy != STORAGE_API_STRATEGY.NONE) {
+        const storage_listener = (key, old_value, new_value, remote) => {
+            if (remote === undefined || remote) {
+                // update all
+                sync_cache(storage)
+                    .then(() => {
+                        // Notify user that storage was mutated by remote
+                        console.log("received notification")
+                        notify_callback();
+                    });
+                // // update only changed key
+                // const value = JSON.parse(new_value);
+                // storage.cache[key] = value;
+            }
+        };
+            
+        listen_notify(notify_strategy, storage_listener);
+    
+        // setInterval strategy. Always fallbacks on this just-in-case there's some undetected issue
+        setInterval(() => {
+            listen_interval(storage, storage_listener);
+        }, STORAGE_SYNC_INTERVAL);
+    }
     
     return syncing;
 }
-
-
-// const notify_callback = () => {
-//     day_gui(year, day);
-// };
-// const sync_mode = STORAGE_SYNC_MODE.MANUAL;
-// const storage = await initialize_storage(sync_mode, notify_callback);
-// 
-// console.log("storage",storage);
-// 
-// let STORED_TIMEKEEPING;
-// if (sync_mode & ~STORAGE_SYNC_MODE.AUTO_PROXY) {
-//     STORED_TIMEKEEPING = storage.get(KEY_TIMEKEEPING, {});
-// } else {
-//     STORED_TIMEKEEPING = storage[KEY_TIMEKEEPING] = storage[KEY_TIMEKEEPING] || {};
-// }
-// console.log("stored_timekeeping",STORED_TIMEKEEPING);
-
-const aoc_url = "https://adventofcode.com";
-const aoc_year_url = (year) => aoc_url + `/${year}`;
-const aoc_day_url = (year, day) => aoc_year_params(year) + `/day/${day}`;
-const aoc_input_url = (year, day) => aoc_day_params(year, day) + `/input`;
-const aoc_answer_url = (year, day) => aoc_day_params(year, day) + `/answer`;
-
-const aoc_trigger_start_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/day/(\\d+)/?(#[^/]*)*');
-const aoc_trigger_end_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/day/(\\d+)/answer/?$');
-const aoc_leaderboard_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/leaderboard.*');
-const aoc_stats_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/leaderboard/self/?$');
 
 //#endregion
 
@@ -639,20 +637,6 @@ const unique = (arr) => [...new Set(arr)];
 
 const set_visible = (e, visible) => visible ? e.setAttribute('style', '') : e.setAttribute('style', 'visibility: hidden;');
 // const set_visible = (e, visible) => visible ? e.removeAttribute('hidden') : e.setAttribute('hidden', '');
-
-const replace_nodeName = (node, new_tagName) => {
-    // console.log("replace_nodename",node,node.attributes);
-    const new_node = document.createElement(new_tagName);
-    [...node.attributes].forEach((attr) => new_node.setAttribute(attr.name, attr.value));
-    new_node.innerHTML = node.innerHTML;
-    node.parentNode.replaceChild(new_node, node)
-    return new_node
-};
-
-const sleep = (ms) => {
-    const date = Date.now();
-    while (Date.now() - date < ms) {};
-};
 
 const msPerMs = 1;
 const msPerSecond = 1000;
@@ -802,6 +786,10 @@ const add_listener = (key, f) => {
     listeners[key] = listeners[key] || [];
     listeners[key].push(f);
 }
+const remove_listener = (key, f) => {
+    listeners[key] = listeners[key] || [];
+    listeners[key] = listeners[key].filter(f2 => f !== f2);
+}
 const call_listeners = (key) => {
     listeners[key].forEach(f => f(key));
 }
@@ -898,7 +886,7 @@ const gui_css_str = () => {
 
 
 const gui_str_break_item = (break_t, break_diff_formatted, resume_t) => {
-    const in_progress = resume_t === undefined ? `class="${SELECTOR_BREAK_IN_PROGRESS.slice(1)}" data-since="${break_t}"` : '';
+    const in_progress = resume_t === undefined ? `class="${SELECTOR_BREAK_IN_PROGRESS.slice(1)}" ${ATTR_DATA_SINCE}="${break_t}"` : '';
 
     return /*html*/`
         <tr>
@@ -916,7 +904,7 @@ const gui_str_break_item = (break_t, break_diff_formatted, resume_t) => {
 };
 
 const gui_str_break_list = (start, star, breaks, resumes, open) => {
-    const dynamic_breaks = star == undefined ? `data-since="${start}" class="${SELECTOR_IN_PROGRESS_BREAKS}"` : '';
+    const dynamic_breaks = star == undefined ? `${ATTR_DATA_SINCE}="${start}" class="${SELECTOR_IN_PROGRESS_BREAKS}"` : '';
     
     const entries = breaks
         .map((n, i) =>
@@ -980,8 +968,10 @@ const gui_str_part = (part, start, star, breaks, resumes) => {
                 ${' -'.repeat(4)}
             </span></td></tr>
             <tr>
-                <td><span>Start: </span></td>
                 <td><span>
+                    Start: 
+                </span></td>
+                <td><span class="${SELECTOR_PART_START.slice(1)}" ${ATTR_DATA_START}="${start}">
                     ${start_timestamp}
                 </span></td>
             </tr>
@@ -989,16 +979,20 @@ const gui_str_part = (part, start, star, breaks, resumes) => {
                 <td colspan = 2>
                     <div class="${SELECTOR_BREAKS.slice(1)}">
                         Breaks:
-                        <span ${on_break ? `class="${SELECTOR_BREAK_TOTAL_IN_PROGRESS.slice(1)}"` : ''} data-since="${start}" data-star="${star || ''}">
+                        <span ${on_break ? `class="${SELECTOR_BREAK_TOTAL_IN_PROGRESS.slice(1)}"` : ''} ${ATTR_DATA_SINCE}="${start}" ${ATTR_DATA_STAR}="${star || ''}">
                             ${total}
                         </span>
-                        ${gui_str_break_list(start, star, breaks_filtered, resumes_filtered, open)}
+                        <div>
+                            ${gui_str_break_list(start, star, breaks_filtered, resumes_filtered, open)}
+                        </div>
                     </div>
                 </td>
             </tr>
             <tr>
-                <td><span>End: </span></td>
                 <td><span>
+                    End: 
+                </span></td>
+                <td><span class="${SELECTOR_PART_END.slice(1)}" ${ATTR_DATA_END}="${star || ''}">
                     ${star_timestamp}
                 </span></td>
             </tr>
@@ -1008,7 +1002,7 @@ const gui_str_part = (part, start, star, breaks, resumes) => {
         </div>
         <div>
             <span>Duration: </span>
-            <span ${star === undefined ? `class="${SELECTOR_IN_PROGRESS.slice(1)}" data-since="${start}"` : ''}>
+            <span ${star === undefined ? `class="${SELECTOR_IN_PROGRESS.slice(1)}" ${ATTR_DATA_SINCE}="${start}"` : ''}>
                 ${duration}
             </span>
         </div>
@@ -1065,24 +1059,36 @@ const gui_str_sidebar = (starts, stars, breaks, resumes) => {
 };
 
 
+let display_interval, update_breaks;
 const day_gui = (year, day, clear = false) => {
     let container;
     if (clear) {
         const container_id = `${GM.info.script.name}-sidebar`;
         container = document.querySelector(`#${container_id}`);
         container.parentNode.removeChild(container);
+
+        clearInterval(display_interval);
+        remove_listener(KEY_BREAKS, update_breaks);
+        remove_listener(KEY_RESUMES, update_breaks);
     }
+
     const sidebar = document.querySelector(SELECTOR_SIDEBAR);
     const container_id = `${GM.info.script.name}-sidebar`;
     sidebar.insertAdjacentHTML("afterEnd", `<div id="${container_id}"></div>`);
     container = document.querySelector(`#${container_id}`);
 
-    let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
-    let timestamps = days[day] = (days[day] || {});
-    let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
-    let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
-    let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
-    let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
+    let days = (STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {}), STORED_TIMEKEEPING[year]);
+    let timestamps = (days[day] = (days[day] || {}), days[day]);
+    let starts = (timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []), timestamps[KEY_STARTS]);
+    let stars = (timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []), timestamps[KEY_STARS]);
+    let breaks = (timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []), timestamps[KEY_BREAKS]);
+    let resumes = (timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []), timestamps[KEY_RESUMES]);
+    // let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
+    // let timestamps = days[day] = (days[day] || {});
+    // let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
+    // let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
+    // let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
+    // let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
     
     // filter break logs, such that it's within [first start .. (last star if complete)]
     let filtered_breaks = breaks
@@ -1110,45 +1116,52 @@ const day_gui = (year, day, clear = false) => {
 
 
     // ui refresh loop
-    let _ = setInterval(() => {
-        let diffs = starts.map((start,i) => (stars[i] || Date.now()) - start );
+    // TODO clean on redraw
+    display_interval = setInterval(() => {
+        const starts = [...container.querySelectorAll(SELECTOR_PART_START)]
+            .map(el => el.getAttribute(ATTR_DATA_START));
+        const stars = [...container.querySelectorAll(SELECTOR_PART_END)]
+            .map(el => el.getAttribute(ATTR_DATA_END));
+        const diffs = starts
+            .map((start,i) => (stars[i] || Date.now()) - start );
+        
         container.querySelectorAll(SELECTOR_IN_PROGRESS).forEach((el, i) => {
-            let since = el.getAttribute("data-since");
-            let duration = time_formatted(Date.now() - since);
-            // let duration = time_formatted(diffs[i]);
+            const since = el.getAttribute(ATTR_DATA_SINCE);
+            const duration = time_formatted(Date.now() - since);
+            // const duration = time_formatted(diffs[i]);
             el.textContent = duration;
         });
         container.querySelectorAll(SELECTOR_TOTAL_IN_PROGRESS).forEach(el => {
-            let break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
-            let sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
-            let sum = diffs.reduce((acc, n) => acc + n, 0) - sum_breaks;
-            let total = time_formatted(sum);
+            const break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
+            const sum_breaks = break_diffs.reduce((acc, n) => acc + n, 0);
+            const sum = diffs.reduce((acc, n) => acc + n, 0) - sum_breaks;
+            const total = time_formatted(sum);
             el.textContent = total;
         });
 
         container.querySelectorAll(SELECTOR_BREAK_IN_PROGRESS).forEach((el) => {
-            let since = el.getAttribute("data-since");
-            let duration = time_formatted(Date.now() - since);
+            const since = el.getAttribute(ATTR_DATA_SINCE);
+            const duration = time_formatted(Date.now() - since);
             el.textContent = duration;
         });
-        container.querySelectorAll(SELECTOR_BREAK_TOTAL_IN_PROGRESS).forEach((el) => {
-            let since = el.getAttribute("data-since");
-            let star = el.getAttribute("data-star") || Date.now();
-            let filtered_filtered_resumes = filtered_resumes
+        container.querySelectorAll(SELECTOR_BREAK_TOTAL_IN_PROGRESS).forEach((el,i) => {
+            const since = starts[i];
+            const star = stars[i] || Date.now();
+            const filtered_filtered_resumes = filtered_resumes
                     .filter(n => since <= n && n <= star)
-            let breaks_diff = filtered_breaks
+                    const breaks_diff = filtered_breaks
                     .filter(n => since <= n && n <= star)
                     .map((n, i) => (filtered_filtered_resumes[i] || Date.now()) - n);
             
-            let sum = breaks_diff.reduce((acc, n) => acc + n, 0);
-            let total = time_formatted(sum, true, 2);
+                    const sum = breaks_diff.reduce((acc, n) => acc + n, 0);
+                    const total = time_formatted(sum, true, 2);
 
             el.textContent = total;
         });
         container.querySelectorAll(SELECTOR_BREAK_TOTAL_TOTAL_IN_PROGRESS).forEach(el => {
-            let break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
-            let sum = break_diffs.reduce((acc, n) => acc + n, 0);
-            let total = time_formatted(sum);
+            const break_diffs = filtered_breaks.map((n, i) => (filtered_resumes[i] || Date.now()) - n );
+            const sum = break_diffs.reduce((acc, n) => acc + n, 0);
+            const total = time_formatted(sum);
             el.textContent = total;
         });
     }, 1000);
@@ -1163,17 +1176,18 @@ const day_gui = (year, day, clear = false) => {
 
     const button_break_func = () => {
         // `starts.length == stars.length` should only hold true when user completed the day.
-        let complete = starts.length === stars.length;
-        let on_break = filtered_breaks.length > filtered_resumes.length;
+        const complete = starts.length === stars.length;
+        const on_break = filtered_breaks.length > filtered_resumes.length;
 
         set_visible(button_break, !on_break);
         set_visible(button_resume, on_break);
 
-        call_listeners(KEY_BREAKS, update_breaks);
-        call_listeners(KEY_RESUMES, update_breaks);
+        call_listeners(KEY_BREAKS);
+        call_listeners(KEY_RESUMES);
 
-        storage.sync();
-        // set_stored_json(KEY_TIMEKEEPING, STORED_TIMEKEEPING);
+        if (sync_mode & STORAGE_SYNC_MODE.MANUAL) {
+            storage.sync();
+        }
 
         container.querySelectorAll(SELECTOR_STATUS).forEach(el => {
             let status = complete ? 'Complete!' : on_break ? 'On Break...' : 'In Progress';
@@ -1184,29 +1198,41 @@ const day_gui = (year, day, clear = false) => {
         });
     };
 
-    const update_breaks = () => {
-        divs_breaks.forEach((el, i) => {
-            let start = starts[i];
-            let star = stars[i]; // likely undefined
-            let filtered_filtered_breaks = filtered_breaks
-                    .filter(n => start <= n && (!star || n <= star));
-            let filtered_filtered_resumes = filtered_resumes
-                    .filter(n => start <= n && (!star || n <= star));
-            el.innerHTML = gui_str_part(i, start, star, filtered_filtered_breaks, filtered_filtered_resumes);
+    update_breaks = () => {
+        if (divs_breaks.length) {
+            divs_breaks.forEach((el, i) => {
+                const start = starts[i];
+                const star = stars[i]; // likely undefined
+                const filtered_filtered_breaks = filtered_breaks
+                        .filter(n => start <= n && (!star || n <= star));
+                const filtered_filtered_resumes = filtered_resumes
+                        .filter(n => start <= n && (!star || n <= star));
+                // el.innerHTML = gui_str_part(i, start, star, filtered_filtered_breaks, filtered_filtered_resumes);
+                let list = el.querySelector("details").parentNode;
+                list.innerHTML = gui_str_break_list(start, star, filtered_filtered_breaks, filtered_filtered_resumes, state_parts[i].open);
 
-            el.querySelector("details").addEventListener("toggle", (ev) => {
-                state_parts[i].open = ev.target.hasAttribute("open");
-            });
-        })
+                list.querySelector("details").addEventListener("toggle", (ev) => {
+                    state_parts[i].open = ev.target.hasAttribute("open");
+                });
+
+                // unhide list if it has contnets but is still hidden
+                const row = el.parentNode.parentNode;
+                if (filtered_filtered_breaks.length && row.hasAttribute("hidden")) {
+                    row.removeAttribute("hidden");
+                }
+            })
+        } else {
+            console.error("TODO")
+        }
     }
 
     button_break.addEventListener("click", (e) => {
         // `starts.length == stars.length` should only hold true when user completed the day.
-        let complete = starts.length === stars.length;
+        const complete = starts.length === stars.length;
         if (complete) {
             console.log(`[WARNING] BUTTON>RESUME> Warn(Code: 0): Already Complete, no reason to 'leak' peristent memory.`);
 
-            let old = button_break.textContent;
+            const old = button_break.textContent;
             button_break.textContent = "Can't start break: Already Complete"
             button_break.setAttribute('disabled', '')
             setTimeout(() => {
@@ -1245,13 +1271,14 @@ const day_gui = (year, day, clear = false) => {
 
 //#endregion
 
+//#region init
 
 const init_day = (year, day) => {
     // opened question
-    let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
-    let timestamps = days[day] = (days[day] || {});
+    let days = (STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {}), STORED_TIMEKEEPING[year]);
+    let timestamps = (days[day] = (days[day] || {}), days[day]);
+    let starts = (timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []), timestamps[KEY_STARTS]);
 
-    let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
     let first_any = false;
     document.body.querySelectorAll(SELECTOR_QUESTION).forEach((_, i) => {
         let part = i+1;
@@ -1277,7 +1304,9 @@ const init_day = (year, day) => {
 
     day_gui(year, day);
 
-    storage.sync();
+    if (sync_mode & STORAGE_SYNC_MODE.MANUAL) {
+        storage.sync();
+    }
 }
 const init_answer_day = (year, day) => {
     // gave answer
@@ -1293,7 +1322,7 @@ const init_answer_day = (year, day) => {
         timestamps = days[day] = {}
     }
 
-    let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
+    let stars = (timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []), timestamps[KEY_STARS]);
     let star_count = stars.length;
 
     let success = document.body.querySelector(SELECTOR_SUCCESS);
@@ -1320,7 +1349,9 @@ const init_answer_day = (year, day) => {
         });
     }
 
-    storage.sync();
+    if (sync_mode & STORAGE_SYNC_MODE.MANUAL) {
+        storage.sync();
+    }
 }
 
 const init_stats = (year) => {
@@ -1352,10 +1383,10 @@ const init_stats = (year) => {
                 timestamps = days[day] = {};
             }
             
-            let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
-            let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
-            let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
-            let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
+            let starts = (timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []), timestamps[KEY_STARTS]);;
+            let stars = (timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []), timestamps[KEY_STARS]);;
+            let breaks = (timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []), timestamps[KEY_BREAKS]);;
+            let resumes = (timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []), timestamps[KEY_RESUMES]);
 
             if (starts.length < stars.length) { // Error instead?
                 console.log(`[WARNING] LEADERBOARD> Warn(Code: 2): User somehow has more stars than starts.`);
@@ -1437,13 +1468,12 @@ const init_page = (trigger_start, trigger_end, stats, year, day) => {
     }
 }
 
+//#endregion
+
 
 //#region entry-point
-let storage, STORED_TIMEKEEPING; // persistent data
+let sync_mode, storage, STORED_TIMEKEEPING; // persistent data
 const main = () => {
-    console.log("PRE_SUPER DEBUG:\n", { ...STORED_TIMEKEEPING });
-    // local storage already retrieved
-
     // check domain for triggers (opened question; gave answer)
     let trigger_start = location.href.match(aoc_trigger_start_regex);
     let trigger_end = location.href.match(aoc_trigger_end_regex);
@@ -1463,24 +1493,52 @@ const main = () => {
         year = parseInt(stats[1], 10);
 
         notify_callback = () => {
-            // TODO personal stats redraw
+            // No need to redraw personal stats page, as nothing there can (currently) write to storage anyway.
         };
     }
 
-    const sync_mode = STORAGE_SYNC_MODE.MANUAL;
-    initialize_storage(sync_mode, notify_callback).then(data => {
+    // sync_mode = STORAGE_SYNC_MODE.RECURSE_AUTO_PROXY; //! broken
+    sync_mode = STORAGE_SYNC_MODE.MANUAL;
+    const exists_GM = typeof GM !== 'undefined' && typeof GM.setValue !== 'undefined' && typeof GM.getValue !== 'undefined';
+    const exists_GM_Listener = exists_GM && typeof GM.addValueChangeListener !== 'undefined';
+    const exists_localstorage = typeof localStorage !== 'undefined'
+
+    // strategy for which api to handle persistent data with
+    let api_strategy = STORAGE_API_STRATEGY.NONE;
+    // Use GM.setValue and GM.getValue if available
+    if (exists_GM) {
+        api_strategy = STORAGE_API_STRATEGY.USE_GM;
+    }
+    // Fall back to localStorage
+    if (!exists_GM && exists_localstorage) {
+        api_strategy = STORAGE_API_STRATEGY.USE_LOCALSTORAGE;
+    }
+
+
+    // strategy for notifying tabs
+    let notify_strategy = STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL
+    // if (exists_GM_Listener) {
+    //     notify_strategy = STORAGE_NOTIFY_STRATEGY.GM_LISTENER
+    // }
+    initialize_storage(sync_mode, api_strategy, notify_strategy, notify_callback).then(data => {
         storage = data;
         
-        if (sync_mode & ~STORAGE_SYNC_MODE.AUTO_PROXY) {
-            STORED_TIMEKEEPING = storage.get(KEY_TIMEKEEPING, {});
+        if (sync_mode & STORAGE_SYNC_MODE.AUTO_PROXY) {
+            // regular default assignments does not work with proxies, as they return rhs, not what the proxy's setter assigned.
+            // STORED_TIMEKEEPING = storage[KEY_TIMEKEEPING] = (storage[KEY_TIMEKEEPING] || {});
+            STORED_TIMEKEEPING = (storage[KEY_TIMEKEEPING] ?? (storage[KEY_TIMEKEEPING] = {}), storage[KEY_TIMEKEEPING]);
         } else {
-            STORED_TIMEKEEPING = storage[KEY_TIMEKEEPING] = storage[KEY_TIMEKEEPING] || {};
+            // STORED_TIMEKEEPING = storage.get(KEY_TIMEKEEPING, {}); // also works
+            const obj = storage.cache;
+            STORED_TIMEKEEPING = (obj[KEY_TIMEKEEPING] ?? (obj[KEY_TIMEKEEPING] = {}), obj[KEY_TIMEKEEPING]);
         }
 
-        init_page(trigger_start, trigger_end, stats, year, day)
-    });
+        console.log("PRE_SUPER DEBUG:\n", STORED_TIMEKEEPING);
 
-    console.log("SUPER DEBUG:\n", STORED_TIMEKEEPING);
+        init_page(trigger_start, trigger_end, stats, year, day)
+
+        console.log("SUPER DEBUG:\n", STORED_TIMEKEEPING);
+    });
 };
 main();
 

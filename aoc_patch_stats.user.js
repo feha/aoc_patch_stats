@@ -2,7 +2,7 @@
 // @name         aoc_patch_stats
 // @icon         https://adventofcode.com/favicon.png
 // @namespace    
-// @version      0.1
+// @version      0.2
 // @description  Patches the bug in AoC where their timekeeping accidentally stores time since questions release, rather than time since user started the question.
 // @author       F
 // @match https://adventofcode.com/*

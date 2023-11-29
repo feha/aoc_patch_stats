@@ -24,13 +24,8 @@
 //      Not to mention how using it would collide with using the site normally...
 
 // TODO fix storage in proxy mode. There are a couple issues with using proxies:
-// TODO they seem to try to index promises ".then" for some reason
-// TODO and bunch of other stuff
+// TODO likes to infinitely loop due to how it interplays with notifications (1 tab notifies another, the proxy somehow thinks it is being triggered and notifies back, and so on)
 
-// TODO cleanup logs
-// TODO ie. broadcastchannel
-
-// TODO clean up todo's and comments
 
 console.log("aoc_patch_times readied");
 // const script = (function(jnode) {
@@ -40,6 +35,7 @@ console.log("aoc_patch_times readied");
 console.log("aoc_patch_times start!");
 
 //#region Enums
+
 const STORAGE_SYNC_MODE = {}
 // User has to manually trigger a write to storage.
 STORAGE_SYNC_MODE.MANUAL= 1 << 0;
@@ -49,11 +45,13 @@ STORAGE_SYNC_MODE.AUTO_PROXY= 1 << 1;
 // setting an index in storage (recursively for nested objects) writes to persistent storage:
 // storage[foo][bar] = foobar
 STORAGE_SYNC_MODE.RECURSE_AUTO_PROXY= 1 << 2 | STORAGE_SYNC_MODE.AUTO_PROXY; //! broken
+
 const STORAGE_API_STRATEGY = {
     USE_GM: 'GM.*',
     USE_LOCALSTORAGE: 'LOCALSTORAGE',
     NONE: 'none',
 };
+
 const STORAGE_NOTIFY_STRATEGY = {
     BROADCASTCHANNEL: 'BroadcastChannel',
     GM_LISTENER: 'GM.addValueChangeListener',
@@ -61,18 +59,20 @@ const STORAGE_NOTIFY_STRATEGY = {
     LOCALSTORAGE: 'localstorage',
     NONE: 'none',
 };
+
 //#endregion
 
 
 //#region Settings/constants/templates
 
-const STORAGE_CACHE_KEY = Symbol('cache');
-const STORAGE_GETSTORAGEKEYS_KEY = Symbol('get_keys');
-const STORAGE_GET_KEY = Symbol('get');
-const STORAGE_SET_KEY = Symbol('set');
-const STORAGE_SYNC_KEY = Symbol('sync');
-const STORAGE_RECURSIVE_PROXY_KEY = Symbol('recurse_proxy');
-const STORAGE_LASTMODIFIED_KEY = 'storage_last_modified'; // As this is meant to be stored in storage, it can't be a Symbol
+const STORAGE_KEY_CACHE = Symbol('cache');
+const STORAGE_KEY_GETSTORAGEKEYS = Symbol('get_keys');
+const STORAGE_KEY_HAS = Symbol('has');
+const STORAGE_KEY_GET = Symbol('get');
+const STORAGE_KEY_SET = Symbol('set');
+const STORAGE_KEY_SYNC = Symbol('sync');
+const STORAGE_KEY_RECURSIVE_PROXY = Symbol('recurse_proxy');
+const STORAGE_KEY_LASTMODIFIED = 'storage_last_modified'; // As this is meant to be stored in storage, it can't be a Symbol
 const STORAGE_PREFIX = `${GM.info.script.name}_`;
 const STORAGE_BROADCASTCHANNEL = `${STORAGE_PREFIX}broadcastchannel`;
 const STORAGE_UNIQUE_TAB = crypto.randomUUID();
@@ -130,11 +130,12 @@ const aoc_stats_regex = new RegExp('^https://adventofcode.com/(\\d{4,})/leaderbo
 //#region Storage utils
 
 /**
- * Initializes the storage mechanism based on availability.
- * Uses GM.setValue/GM.getValue or localStorage.
- * Handles synchronization between multiple tabs.
- * @returns {Object} Storage object, or a proxy (hiding any usage of cache- and api-usage) if sync_mode is not MANUAL.
- * Also allows access to internal cache, get, set, and get_keys properties using the appropriate Symbol()'s.
+ * Initializes the storage mechanism based on sync_mode and strategies.
+ * Uses GM.setValue/GM.getValue or localStorage as api strategies.
+ * Handles synchronization between multiple tabs with notification strategies.
+ * @returns {Object} Promise for a Storage object,
+ *  or a proxy (hiding any usage of cache- and api-usage, unless using the respective Symbol's) if sync_mode is not MANUAL.
+ * Promise resolves when the exposed storage object has been synced to the data in storage.
  */
 function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_callback) {
     function parse_json_value(value, default_value) {
@@ -166,17 +167,39 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
     }
 
     // getter and setter that returns a getter and setter for desired api.
+    function storage_has_api(api_strategy) {
+        switch (api_strategy) {
+            case STORAGE_API_STRATEGY.USE_GM:
+                return (key) => {
+                    return GM.getValue(key)
+                        .then(value => value === undefined);
+                    // return GM.listValues()
+                    //     .then(keys => keys.includes(key));
+                }
+            case STORAGE_API_STRATEGY.USE_LOCALSTORAGE:
+                return (key) => {
+                    // use a prefix for localstorage, to avoid conflicts
+                    const prefixed_key = `${STORAGE_PREFIX}${key}`;
+                    value = localStorage.get_item(prefixed_key) === undefined;
+                    return Promise.resolve(value);
+                }
+            default:
+                return () => Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to see if key exists in storage.'));
+        }
+    }
     function storage_get_api(api_strategy) {
         switch (api_strategy) {
             case STORAGE_API_STRATEGY.USE_GM:
                 return (key, default_value) => {
                     try {
-                        // we can't know if it returned value or default_value,
-                        //  so can't tell when to parse and as such always parses.
-                        // So prepare default value for being parsed.
-                        const json_str = JSON.stringify(default_value);
-                        return GM.getValue(key, json_str)
+                        return GM.getValue(key)
                             .then(value => value !== undefined ? parse_json_value(value) : default_value);
+                        // // we can't know if it returned value or default_value,
+                        // //  so can't tell when to parse and as such always parses.
+                        // // So prepare default value for being parsed.
+                        // const json_str = JSON.stringify(default_value);
+                        // return GM.getValue(key, json_str)
+                        //     .then(value => value !== undefined ? parse_json_value(value) : default_value);
                     } catch (error) {
                         console.error(`Error getting value with GM.getValue: ${error}`);
                         return Promise.reject(error);
@@ -187,11 +210,11 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
                     // use a prefix for localstorage, to avoid conflicts
                     const prefixed_key = `${STORAGE_PREFIX}${key}`;
                     value = localStorage.getItem(prefixed_key);
-                    value = value ? parse_json_value(value) : default_value;
+                    value = value !== undefined ? parse_json_value(value) : default_value;
                     return Promise.resolve(value);
                 }
             default:
-                return () => Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to set value in storage.'));
+                return () => Promise.reject(new Error('Error: No storage-api strategy selected, but still tried to get value in storage.'));
         }
     }
     function storage_set_api(api_strategy) {
@@ -214,18 +237,20 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
         }
     }
     // getter and setter that hides away implementation strategies through a closure
+    function storage_has_value_in_storage(key) {
+        return storage_has_api(api_strategy)(key);
+    }
     function storage_get_value_in_storage(key, default_value) {
         return storage_get_api(api_strategy)(key, default_value);
     }
     function storage_set_value_in_storage(key, old_value, value) {
-        console.log("storage_set_value_in_storage", key, old_value, value)
         const json_str = JSON.stringify(value);
         return storage_set_api(api_strategy)(key, json_str)
             .then(() => {
                 // notify other tabs that storage has been updated.
                 notify_tabs(api_strategy, notify_strategy, key, old_value, value);
                 // update modification timestamp.
-                storage_set_api(api_strategy)(STORAGE_LASTMODIFIED_KEY, Date.now())
+                storage_set_api(api_strategy)(STORAGE_KEY_LASTMODIFIED, Date.now())
                     .then(() => {
                         // notify other tabs that storage has been updated.
                         notify_tabs(api_strategy, notify_strategy, key, old_value, value);
@@ -234,31 +259,19 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
     }
 
     // getter and setter for the storage object (handles syncing both cache and persistent storage)
+    function storage_has_value(storage, key) {
+        return storage.cache.hasOwnProperty(key);
+    }
     function storage_get_value(storage, key, default_value) {
+        // As GM.getValue is asynchronous, but this method is meant to be synchronous,
+        //  we can't try to get the value from storage here.
+        // But that is ok as the cache is kept up-to-date by the notify_listener, initializes synced with storage,
+        //  and is the working-data, meaning cache should never be behind storage anyway (it can be ahead).
+        // Instead, if value is not in cache, we simply assume it's not in storage at all and returns the default value.
         if (storage.cache.hasOwnProperty(key)) {
             return storage.cache[key] = storage.cache[key] || default_value;
         } else {
-            // As GM.getValue is asynchronous, but this method is meant to be synchronous,
-            //  we can't try to get the value from storage here.
-            // But that is ok as the cache is kept up-to-date with storage_set_value and the notify_listener (and initialized with storage contents),
-            //  meaning cache should never be out of sync with storage anyway.
-            // Instead, if value is not in cache, we simply assume it's not in storage at all.
             return default_value;
-
-            // // Handle the case where no strategy has been selected.
-            // // Which in this case means returning default value, as cache is empty.
-            // if (api_strategy == STORAGE_API_STRATEGY.NONE) {
-            //     return Promise.resolve(default_value);
-            // }
-            // // Get value from storage.
-            // const value_promise = storage_get_value_from_storage(api_strategy, key, default_value)
-            //     .then(stored_value => {
-            //         const value = parse_json_value(stored_value, default_value)
-            //         // update cache
-            //         storage.cache[key] = value;
-            //         return value;
-            //     });
-            // return value_promise;
         }
     }
     function storage_set_value(sync_mode, storage, key, value) {
@@ -283,17 +296,18 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
         // As user might have references to nested objects in storage.cache,
         //  when updating the cache object (or any of the nested ones) we can't just replace it entirely.
         // Instead we want to only update the _changes_ between the values:
-        //  assign value if it was a primitive type (because no pointer can get disconnected anyway, no need to bother with equality).
-        //  delete old keys that has been removed.
-        //  assign new keys that didn't exist yet.
-        //  recursively do this for key-conflicts.
+        // - assign value if it was a primitive type (because no pointer can get disconnected anyway, no need to bother with equality).
+        // - delete old keys that has been removed.
+        // - assign new keys that didn't exist yet.
+        // - recursively do this for key-conflicts.
+        // This is so that sync_cache keeps references to unchanged objects the same.
         const old_value = obj1[key];
         const new_value = obj2[key];
         if (typeof old_value === 'object' && typeof new_value === 'object' ) {
             Object.keys(old_value)
                 .forEach(old_key => {
                     if (old_key in new_value) {
-                        // union is detected twice, ignore once.
+                        // intersection is detected twice, ignore once.
                     } else {
                         // remove nonexistent keys 
                         delete old_value[old_key];
@@ -302,6 +316,7 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
             Object.keys(new_value)
                 .forEach(new_key => {
                     if (new_key in old_value) {
+                        // intersection
                         // recursively sync the objects 
                         sync_object_keeping_refs(old_value, new_value, new_key);
                     } else {
@@ -337,9 +352,8 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
     }
 
     function notify_tabs(api_strategy, notify_strategy, key, old_value, value) {
-        if (api_strategy != STORAGE_API_STRATEGY.NONE && notify_strategy == STORAGE_NOTIFY_STRATEGY.NONE) {
-            // TODO ERROR and warn the user that storage can't be synced between tabs,
-            // TODO  and that they can therefor overwrite each other
+        if (api_strategy != STORAGE_API_STRATEGY.NONE || notify_strategy == STORAGE_NOTIFY_STRATEGY.NONE) {
+            console.error('[WARNING] Either no storage api is availbable or no notification strategy has been chosen. Unable to notify to keep tabs synced. If you are using multiple tabs, expect them to override eachother as they write to storage.');
         }
         switch (notify_strategy) {
             case STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL:
@@ -353,21 +367,21 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
                 if (api_strategy == STORAGE_API_STRATEGY.USE_GM) {
                     // An event is dispatched automatically by GM.setValue, no need to do it ourselves
                 } else {
-                    // TODO use GM.addValueChangeListener somehow to trigger "storage" event artificially
+                    // Unimplemented
+                    // ... use GM.addValueChangeListener somehow to trigger "storage" event artificially
                 }
                 break;
             case STORAGE_NOTIFY_STRATEGY.POSTMESSAGE:
-                // TODO any message sent is afaik visible to ALL  other scripts, in ALL windows.
-                // TODO  might not want to send data (and instead only send a notif that it should read changes from storage),
-                // TODO  or encrypt data before sending (as the key will be public in repo, this would be only be minor obfuscation).
-                // TODO Same code for both strategies, maybe change to not use nested switch-statements?
-                window.postMessage({ key, old_value, value }, window.location.origin);
+                // Any message sent is afaik visible to ALL other scripts, in ALL windows.
+                // As such, do not send any data and only notify that storage was changed.
+                window.postMessage(true, window.location.origin);
                 break;
             case STORAGE_NOTIFY_STRATEGY.LOCALSTORAGE:
                 if (api_strategy == STORAGE_API_STRATEGY.USE_LOCALSTORAGE) {
                     // An event is dispatched automatically by localstorage, no need to do it ourselves
                 } else {
-                    // TODO use localstorage somehow to trigger "storage" event artificially
+                    // Unimplemented
+                    // ... use localstorage somehow to trigger "storage" event artificially
                 }
                 break;
             default:
@@ -390,10 +404,7 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
                 });
                 break;
             case STORAGE_NOTIFY_STRATEGY.GM_LISTENER:
-                // TODO change "savedTab" to a listener for every key
-                // TODO look into how this listener handles deleted keys, or cleared storage
-                // TODO ALTERNATIVELY use last_modified key and sync everything
-                listener_id = GM.addValueChangeListener(STORAGE_LASTMODIFIED_KEY, function(key, oldValue, newValue, remote) {
+                listener_id = GM.addValueChangeListener(STORAGE_KEY_LASTMODIFIED, function(key, oldValue, newValue, remote) {
                     listener(key, oldValue, newValue, remote)
                 });
                 break;
@@ -417,89 +428,86 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
                 });
                 break;
             default:
-                // TODO do a WARNING
+                console.error('[WARNING] No notification strategy has been chosen. Unable to listen for notifications to keep tabs synced. If you are using multiple tabs, expect them to override eachother as they write to storage.');
                 break;
         }
         return listener_id;
     }
     function listen_interval(storage, listener, all=true) {
-        storage_get_value_in_storage(STORAGE_LASTMODIFIED_KEY)
+        storage_get_value_in_storage(STORAGE_KEY_LASTMODIFIED)
             .then(currentModified => {
-                const lastModified = storage.cache[STORAGE_LASTMODIFIED_KEY] || 0;
+                const lastModified = storage.cache[STORAGE_KEY_LASTMODIFIED] || 0;
                 if (currentModified === undefined || currentModified > lastModified) {
                     // Update last modification timestamp in cache
-                    storage.cache[STORAGE_LASTMODIFIED_KEY] = currentModified;
+                    storage.cache[STORAGE_KEY_LASTMODIFIED] = currentModified;
                     
                     // Storage has changed, trigger the listener function
                     if (all) {
                         listener();
                     } else {
-                        // TODO call listener for EVERY key?
-                        // TODO call listener for changed keys?
+                        // ? call listener for EVERY key?
+                        // ? call listener for changed keys?
                     }
                 }
             });
     }
 
-    function storage_hide_internals(storage) {
-        // Create a proxy-object that forwards indexing to STORAGE_GET_KEY and STORAGE_SET_KEY methods.
-        // TODO consider making this more generic where the mapping is passed as an argument
-        const storage_hide_internals = {
-            [STORAGE_CACHE_KEY]: storage.cache,
-            [STORAGE_GET_KEY]: storage.get,
-            [STORAGE_SET_KEY]: storage.set,
-            [STORAGE_GETSTORAGEKEYS_KEY]: storage.get_keys,
-            [STORAGE_SYNC_KEY]: () => storage.sync,
+    function storage_internals() {
+        return {
+            [STORAGE_KEY_CACHE]: "cache",
+            [STORAGE_KEY_HAS]: "has",
+            [STORAGE_KEY_GET]: "get",
+            [STORAGE_KEY_SET]: "set",
+            [STORAGE_KEY_GETSTORAGEKEYS]: "get_keys",
+            [STORAGE_KEY_SYNC]: "sync",
         };
-        return storage_hide_internals;
     }
 
-    function storage_create_proxy(obj, recursive_mutation_callback) {
-        // // identifier to be able to know object is a proxy, so we don't wrap proxies
-        // obj[STORAGE_RECURSIVE_PROXY_KEY] = true;
+    function storage_create_proxy(storage, recursive_mutation_callback) {
+        let proxy = {};
+        let handler = {};
 
-        // Do not forward the internal symbols. Allows to ie. explicitly index value in storage.cache
+        // Store internal symbols so they can be caught by the proxy. Allows to ie. explicitly index the cache directly.
+        const internal_map = storage_internals();
         const internals = [
-            ...Object.keys(obj),
-            ...Object.getOwnPropertySymbols(obj)
+            ...Object.keys(internal_map),
+            ...Object.getOwnPropertySymbols(internal_map)
         ];
-        let proxy;
 
-        let as_obj_or_proxy = (obj2) => obj2;
+        // Hide internal symbols in the proxy, storage is entirely decoupled from proxy aside from those keys
+        internals.forEach(k => {
+            proxy[k] = storage[internal_map[k]];
+        });
+
+
+        let ensure_proxy = (obj) => obj;
         if (typeof recursive_mutation_callback !== 'undefined' && typeof recursive_mutation_callback === 'function') {
-            as_obj_or_proxy = (obj2, key, target) => {
-                let obj_as_proxy = obj2;
+            ensure_proxy = (obj, key, target) => {
+                let obj_as_proxy = obj;
                 const set_callback = () => {
-                    //! gets a new proxy object each time, wont work
-                    if (proxy[key] === obj2 || proxy[key] === obj_as_proxy) {
-                        recursive_mutation_callback(key, undefined, obj_as_proxy)
+                    // guard against the key having been reassigned and the callback was from an old value
+                    const obj2 = proxy[key];
+                    if ((obj[STORAGE_KEY_RECURSIVE_PROXY]?.() ?? obj) === (obj2[STORAGE_KEY_RECURSIVE_PROXY]?.() ?? obj2)) {
+                    // if (proxy[key] === obj || proxy[key] === obj_as_proxy) {
+                        // recursive_mutation_callback(key, undefined, obj_as_proxy)
                     }
                 };
-                obj_as_proxy = create_recursive_proxy(set_callback, obj2); // need to update "obj" to the proxy, as Proxy(obj) !== obj
+                obj_as_proxy = create_recursive_proxy(set_callback, obj); // need to update "obj" to the proxy, as Proxy(obj) !== obj
                 return obj_as_proxy;
             }
         }
-        // if (typeof propagate !== 'undefined') {
-        //     // callback that re-triggers the setter for this key
-        //     const set_callback = () => {
-        //         // guard against the key having been reassigned and the callback was from an old value
-        //         if (proxy[prop] === value) {
-        //             // proxy[prop] = value;
-        //             target[STORAGE_SET_KEY](prop, value);
-        //         }
-        //     };
-        //     value = create_recursive_proxy(set_callback, value);
-        // }
-        const handler = {
+        handler = {
             get: function(target, prop) {
                 if (internals.includes(prop)) {
                     return target[prop];
                 }
-                let value = target[STORAGE_GET_KEY](prop);
-                value = as_obj_or_proxy(value, prop, target);
-                target[STORAGE_SET_KEY](prop, value);
-                // call .storage_get_value
-                return value;
+                if (target[STORAGE_KEY_HAS](prop)) {
+                    let value = target[STORAGE_KEY_GET](prop);
+                    value = ensure_proxy(value, prop, target);
+                    // target[STORAGE_KEY_SET](prop, value);
+                    return value;
+                }
+                return undefined;
             },
             set: function(target, prop, value) {
                 if (internals.includes(prop)) {
@@ -507,52 +515,56 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
                     return true;
                 }
                 // value = as_obj_or_proxy(value, prop);
-                // call .storage_set_value
-                target[STORAGE_SET_KEY](prop, value);
+                target[STORAGE_KEY_SET](prop, value);
                 return true;
             },
         };
-        proxy = new Proxy(obj, handler);
+        proxy = new Proxy(proxy, handler);
         
         return proxy;
     }
 
     function create_recursive_proxy(set_callback, obj) {
         if (typeof obj === 'object') {
-            if (obj[STORAGE_RECURSIVE_PROXY_KEY]) {
+            if (obj[STORAGE_KEY_RECURSIVE_PROXY]) {
                 // Already a proxy, don't wrap
                 return obj;
             } else {
                 // Create a proxy that proxies future values in this object, recursively
+
+                // Store internal symbols, so they can be caught by the proxy.
+                // Allows to redirect indexing to handler, and avoid affecting source object.
                 const internals = [
-                    STORAGE_RECURSIVE_PROXY_KEY,
+                    STORAGE_KEY_RECURSIVE_PROXY,
                 ];
 
+                const target = obj;
                 const handler = {
                     get: function(target, prop) {
                         if (internals.includes(prop)) {
                             return handler[prop];
                         }
-                        let value = target[prop];
-                        value = create_recursive_proxy(set_callback, value);
-                        return value;
+                        if (prop in target) {
+                            let value = target[prop];
+                            value = create_recursive_proxy(set_callback, value);
+                            return value;
+                        }
+                        return undefined;
                     },
                     set: function(target, prop, value) {
                         if (internals.includes(prop)) {
                             handler[prop] = value;
                             return true;
                         }
-                        if (target[prop] !== value) {
-                            // value = create_recursive_proxy(set_callback, value);
-                            target[prop] = value;
-                            set_callback(); // notify storage
-                        }
+                        // value = create_recursive_proxy(set_callback, value);
+                        target[prop] = value;
+                        set_callback(); // notify storage
                         return true;
                     },
                     // identifier to be able to know object is already a proxy, to avoid proxying the proxy.
-                    [STORAGE_RECURSIVE_PROXY_KEY]: true,
+                    [STORAGE_KEY_RECURSIVE_PROXY]: () => target[STORAGE_KEY_RECURSIVE_PROXY]?.() ?? target,
                 };
-                obj = new Proxy(obj, handler);
+                obj = new Proxy(target, handler);
             }
         }
         
@@ -566,10 +578,12 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
 
     const storage = {};
     storage.cache = {};
-
     // Get all keys in storage
     storage.get_keys = function () {
         return storage_get_keys(api_strategy, storage);
+    };
+    storage.has = function(key) {
+        return storage_has_value(storage, key);
     };
     storage.get = function(key, default_value) {
         return storage_get_value(storage, key, default_value);
@@ -577,6 +591,7 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
     storage.set = function(key, value) {
         return storage_set_value(sync_mode, storage, key, value);
     };
+    // save cache to storage
     storage.sync = function() {
         sync_storage(storage);
     };
@@ -587,15 +602,12 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
         .then(() => {
             let exposed_storage = storage;
             if (sync_mode & STORAGE_SYNC_MODE.AUTO_PROXY) {
-                exposed_storage = storage_hide_internals(storage);
                 let mutation_callback;
                 if (sync_mode == STORAGE_SYNC_MODE.RECURSE_AUTO_PROXY) {
                     mutation_callback = (key, old_value, value) => storage_mutation_callback(key, old_value, value)
                 }
                 // Return a proxy for the storage object
                 exposed_storage = storage_create_proxy(exposed_storage, mutation_callback);    
-            } else {
-                exposed_storage = {...exposed_storage};
             }
             return exposed_storage;
         });
@@ -611,9 +623,7 @@ function initialize_storage(sync_mode, api_strategy, notify_strategy, notify_cal
                         console.log("received notification")
                         notify_callback();
                     });
-                // // update only changed key
-                // const value = JSON.parse(new_value);
-                // storage.cache[key] = value;
+                // ? update only changed key
             }
         };
             
@@ -928,9 +938,8 @@ const gui_str_break_list = (start, star, breaks, resumes, open) => {
 
 const state_parts=[];
 const gui_str_part = (part, start, star, breaks, resumes) => {
-    // `start` is ensured to be defined, but not any of the other fields.
+    // `part` and `start` are ensured to be defined, but not any of the other fields.
 
-    // // `starts.map` ensures start is defined, but not the 'zipped' values.
     // let star = star; // likely undefined
     let diff = (star || Date.now()) - start; // likely NaN
 
@@ -1077,18 +1086,12 @@ const day_gui = (year, day, clear = false) => {
     sidebar.insertAdjacentHTML("afterEnd", `<div id="${container_id}"></div>`);
     container = document.querySelector(`#${container_id}`);
 
-    let days = (STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {}), STORED_TIMEKEEPING[year]);
-    let timestamps = (days[day] = (days[day] || {}), days[day]);
-    let starts = (timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []), timestamps[KEY_STARTS]);
-    let stars = (timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []), timestamps[KEY_STARS]);
-    let breaks = (timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []), timestamps[KEY_BREAKS]);
-    let resumes = (timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []), timestamps[KEY_RESUMES]);
-    // let days = STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {});
-    // let timestamps = days[day] = (days[day] || {});
-    // let starts = timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []);
-    // let stars = timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []);
-    // let breaks = timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []);
-    // let resumes = timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []);
+    const days = (STORED_TIMEKEEPING[year] = (STORED_TIMEKEEPING[year] || {}), STORED_TIMEKEEPING[year]);
+    const timestamps = (days[day] = (days[day] || {}), days[day]);
+    const starts = (timestamps[KEY_STARTS] = (timestamps[KEY_STARTS] || []), timestamps[KEY_STARTS]);
+    const stars = (timestamps[KEY_STARS] = (timestamps[KEY_STARS] || []), timestamps[KEY_STARS]);
+    const breaks = (timestamps[KEY_BREAKS] = (timestamps[KEY_BREAKS] || []), timestamps[KEY_BREAKS]);
+    const resumes = (timestamps[KEY_RESUMES] = (timestamps[KEY_RESUMES] || []), timestamps[KEY_RESUMES]);
     
     // filter break logs, such that it's within [first start .. (last star if complete)]
     let filtered_breaks = breaks
@@ -1098,12 +1101,13 @@ const day_gui = (year, day, clear = false) => {
 
 
     // Apply CSS
+    // TODO check for existence of GM.addStyle
     gui_css_str().forEach(rule => GM.addStyle(rule));
-    // let sheet = document.styleSheets[1];
+    // const sheet = document.styleSheets[1];
     // gui_css_str().forEach(rule => sheet.insertRule(rule, sheet.cssRules.length));
 
     // create gui
-    let str = gui_str_sidebar(starts, stars, filtered_breaks, filtered_resumes);
+    const str = gui_str_sidebar(starts, stars, filtered_breaks, filtered_resumes);
     container.insertAdjacentHTML("beforeEnd", str);
 
     
@@ -1116,7 +1120,6 @@ const day_gui = (year, day, clear = false) => {
 
 
     // ui refresh loop
-    // TODO clean on redraw
     display_interval = setInterval(() => {
         const starts = [...container.querySelectorAll(SELECTOR_PART_START)]
             .map(el => el.getAttribute(ATTR_DATA_START));
@@ -1166,11 +1169,11 @@ const day_gui = (year, day, clear = false) => {
         });
     }, 1000);
 
-    let divs_breaks = container.querySelectorAll(SELECTOR_BREAKS);
-    let button_break = container.querySelector(SELECTOR_BUTTON_BREAK);
-    let button_resume = container.querySelector(SELECTOR_BUTTON_RESUME);
+    const divs_breaks = container.querySelectorAll(SELECTOR_BREAKS);
+    const button_break = container.querySelector(SELECTOR_BUTTON_BREAK);
+    const button_resume = container.querySelector(SELECTOR_BUTTON_RESUME);
 
-    let on_break = filtered_breaks.length > filtered_resumes.length;
+    const on_break = filtered_breaks.length > filtered_resumes.length;
     set_visible(button_break, !on_break);
     set_visible(button_resume, on_break);
 
@@ -1199,31 +1202,27 @@ const day_gui = (year, day, clear = false) => {
     };
 
     update_breaks = () => {
-        if (divs_breaks.length) {
-            divs_breaks.forEach((el, i) => {
-                const start = starts[i];
-                const star = stars[i]; // likely undefined
-                const filtered_filtered_breaks = filtered_breaks
-                        .filter(n => start <= n && (!star || n <= star));
-                const filtered_filtered_resumes = filtered_resumes
-                        .filter(n => start <= n && (!star || n <= star));
-                // el.innerHTML = gui_str_part(i, start, star, filtered_filtered_breaks, filtered_filtered_resumes);
-                let list = el.querySelector("details").parentNode;
-                list.innerHTML = gui_str_break_list(start, star, filtered_filtered_breaks, filtered_filtered_resumes, state_parts[i].open);
+        divs_breaks.forEach((el, i) => {
+            const start = starts[i];
+            const star = stars[i]; // likely undefined
+            const filtered_filtered_breaks = filtered_breaks
+                    .filter(n => start <= n && (!star || n <= star));
+            const filtered_filtered_resumes = filtered_resumes
+                    .filter(n => start <= n && (!star || n <= star));
+            
+            const list = el.querySelector("details").parentNode;
+            list.innerHTML = gui_str_break_list(start, star, filtered_filtered_breaks, filtered_filtered_resumes, state_parts[i].open);
 
-                list.querySelector("details").addEventListener("toggle", (ev) => {
-                    state_parts[i].open = ev.target.hasAttribute("open");
-                });
+            list.querySelector("details").addEventListener("toggle", (ev) => {
+                state_parts[i].open = ev.target.hasAttribute("open");
+            });
 
-                // unhide list if it has contnets but is still hidden
-                const row = el.parentNode.parentNode;
-                if (filtered_filtered_breaks.length && row.hasAttribute("hidden")) {
-                    row.removeAttribute("hidden");
-                }
-            })
-        } else {
-            console.error("TODO")
-        }
+            // unhide list if it has contents but is still hidden
+            const row = el.parentNode.parentNode;
+            if (filtered_filtered_breaks.length && row.hasAttribute("hidden")) {
+                row.removeAttribute("hidden");
+            }
+        });
     }
 
     button_break.addEventListener("click", (e) => {
@@ -1251,7 +1250,7 @@ const day_gui = (year, day, clear = false) => {
     });
     button_resume.addEventListener("click", (e) => {
         // `starts.length == stars.length` should only hold true when user completed the day.
-        let complete = starts.length === stars.length;
+        const complete = starts.length === stars.length;
         if (complete) {
             console.log(`[WARNING] BUTTON>RESUME> Warn(Code: 0): Somehow tried to end a break when finished. THIS SHOULD BE IMPOSSIBLE STATE!!!`);
             return; // abort
@@ -1514,12 +1513,9 @@ const main = () => {
         api_strategy = STORAGE_API_STRATEGY.USE_LOCALSTORAGE;
     }
 
-
     // strategy for notifying tabs
     let notify_strategy = STORAGE_NOTIFY_STRATEGY.BROADCASTCHANNEL
-    // if (exists_GM_Listener) {
-    //     notify_strategy = STORAGE_NOTIFY_STRATEGY.GM_LISTENER
-    // }
+
     initialize_storage(sync_mode, api_strategy, notify_strategy, notify_callback).then(data => {
         storage = data;
         

@@ -40,11 +40,6 @@ This could be useful for easily inserting known data from old years (if you trac
 
 Preferably, something like clicking the elements directly in the timekeeping and leaderboard should turn the element into something editable. Though some other ui would be needed to add breaks belatedly after you already got the star.
 
-### **Tab Safety**
-Currently if retrieves the timekeeping data from storage once on load, and updates the storage whenever it modifies it. Because of how it never fetches it anew, there is no safety preventing one tab from overwriting anothers modifications.
-
-That said, it's not like regular usage for AoC would involve keeping the tabs for multiple days open. And even if you keep the stats-page open alongside whatever day you are working on, there's no issue as that page only reads and doesn't modify the storage. Nevertheless, might be worthwhile to make it retrieve any potential new data each time it wants to modify, including whatever race-condition (etc.) safeties javascript has for localstorage (because surely you can answer two different days/tabs so quickly it matters!).
-
 ### Impossibly Proper breaks
 Currently it only keeps track of your breaks through manual buttons (and auto-resuming when completing a star).
 
@@ -56,8 +51,8 @@ Currently only exposes this data on your personal leaderboard.
 Not that it would make much sense to do so for any leaderboards populated with other users, considering there's no way for this script to have their data.
 
 ### Persistent data
-This userscript is currently unable to persist it's data (beyond browser's localstorage), and as such it will only survive as long as your harddrives do (or less if you, say, uninstall your browser).
-To be exact, it stores it in *greasemonkey*/*tampermonkeys* version of localstorage, so you could technically migrate or backup the data if you know where it stores that.
+This userscript is currently unable to persist it's data (beyond browser's localstorage/userscript-storage), and as such it will only survive as long as your harddrives do (or less if you, say, uninstall your browser).
+To be exact, it stores data in *greasemonkey*/*tampermonkeys* version of localstorage if possible, so you could technically migrate or backup the data if you know where it stores that.
 
 Sadly, I have been unable to figure out how to store the data persistently on the AoC account. There is no setting that allows the user to fill with encoded json-data without breaking anything.
 
